@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environment & secrets
+.env
+.env.local
+*.env
+
+# Build artifacts & backups
+*.backup
+goose_bin/
+goose_extracted/
+
+# External dependencies (not part of Agent Guardian)
+goose-cli-source/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
