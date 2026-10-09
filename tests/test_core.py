@@ -241,7 +241,7 @@ class TestTurnContextDeduplication:
         # (The dedup check handles None gracefully)
         # Actual logic checks `if tool_call_id and tool_call_id not in ...`
         # So None is never added - we don't add it in the test either
-        
+
         tool_call_id = None
         if tool_call_id and tool_call_id not in self.context._seen_tool_call_ids:
             self.context._seen_tool_call_ids.add(tool_call_id)
@@ -311,10 +311,31 @@ class TestFailureClassifier:
         assert result.recommended_action == RecoveryAction.NO_SAFE_RECOVERY
         assert result.confidence == 0.9
 
-    def test_replay_safe_blocked_by_turn_context(self):
-        """Test that replay_safe becomes False when turn context shows activity."""
+    def test_retryable_but_not_replay_safe_separation(self):
+        """Test that retryable and replay_safe are properly separated.
+
+        A transient network error should be retryable (technically we can try again)
+        but NOT replay_safe if tools have already started.
+        """
         turn_context = TurnContext(session_id="sess_test")
-        turn_context.assistant_chunks_received = 5
+        turn_context.tool_calls_started = 1  # Tool already started
+
+        result = self.classifier.classify(
+            error_message="Connection reset by peer",
+            turn_context=turn_context,
+        )
+
+        # Technically retryable (network error)
+        assert result.retryable is True
+        # But NOT replay_safe because tool already started
+        assert result.replay_safe is False
+        # RECONNECT_ACP is still valid (doesn't replay prompt)
+        assert result.recommended_action == RecoveryAction.RECONNECT_ACP
+
+    def test_rate_limit_retryable_and_replay_safe_when_no_tools(self):
+        """Rate limit with no tool activity should be both retryable and replay_safe."""
+        turn_context = TurnContext(session_id="sess_test")
+        # No tool activity
 
         result = self.classifier.classify(
             error_message="429 Too Many Requests",
@@ -322,8 +343,9 @@ class TestFailureClassifier:
             turn_context=turn_context,
         )
 
-        assert result.replay_safe is False
-        assert result.recommended_action == RecoveryAction.NO_SAFE_RECOVERY
+        assert result.retryable is True
+        assert result.replay_safe is True
+        assert result.recommended_action == RecoveryAction.WAIT_AND_RETRY
 
     def test_tool_activity_blocks_replay(self):
         turn_context = TurnContext(session_id="sess_test")
@@ -345,6 +367,7 @@ class TestFailureClassifier:
 
         assert result.failure_type == FailureType.USER_CANCELLED
         assert result.retryable is False
+        assert result.requires_human is True
         assert result.recommended_action == RecoveryAction.HUMAN_INTERVENTION
 
 

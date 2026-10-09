@@ -540,24 +540,35 @@ class FailureClassifier:
                 raw_error=error_message,
             )
         
-        # Adjust replay_safe based on turn context
+        # Determine technical retry eligibility (separate from replay safety)
+        # A failure is technically retryable if the pattern says so
+        # This is about technical feasibility, not safety
+        technically_retryable = best_match.retryable
+        
+        # Replay safety is about whether re-executing the prompt is safe
+        # This considers turn context (side effects observed)
         replay_safe = best_match.replay_safe
         if turn_context and not turn_context.is_safe_to_replay():
             replay_safe = False
         
-        # If not replay_safe, can't do WAIT_AND_RETRY or CANCEL_AND_REPLAY
+        # Determine recommended action based on BOTH technical feasibility AND safety
         recommended_action = best_match.recommended_action
-        if not replay_safe and recommended_action in (
+        if not technically_retryable:
+            # Not technically retryable (e.g., auth failure, config error)
+            # Use the pattern's recommended action (e.g., HUMAN_INTERVENTION)
+            pass  # Keep the pattern's recommended_action
+        elif not replay_safe and recommended_action in (
             RecoveryAction.WAIT_AND_RETRY,
             RecoveryAction.CANCEL_AND_REPLAY,
             RecoveryAction.RELOAD_SESSION,
             RecoveryAction.FORK_SESSION,
         ):
+            # Safe to retry technically, but not safe to replay (side effects occurred)
             recommended_action = RecoveryAction.NO_SAFE_RECOVERY
         
         return FailureClassification(
             failure_type=best_match.failure_type,
-            retryable=best_match.retryable,
+            retryable=technically_retryable,
             replay_safe=replay_safe,
             requires_human=best_match.requires_human,
             recommended_action=recommended_action,
