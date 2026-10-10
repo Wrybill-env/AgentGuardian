@@ -349,14 +349,30 @@ class OpenCodeObserver:
     async def connect_acp(self, opencode_path: str = "opencode") -> bool:
         """Connect to OpenCode via ACP stdio subprocess."""
         try:
-            self._process = subprocess.Popen(
-                [opencode_path, "acp"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            # On Windows, opencode is a .cmd file, so we need to use shell=True or the .cmd extension
+            import sys
+            if sys.platform == "win32":
+                # Use the full path to the .cmd file
+                if not opencode_path.endswith(".cmd"):
+                    opencode_path = opencode_path + ".cmd"
+                self._process = subprocess.Popen(
+                    [opencode_path, "acp"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    shell=True,  # Required on Windows for .cmd files
+                )
+            else:
+                self._process = subprocess.Popen(
+                    [opencode_path, "acp"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
             
             self._running = True
             self._read_task = asyncio.create_task(self._read_loop())
