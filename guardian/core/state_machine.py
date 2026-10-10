@@ -25,6 +25,7 @@ from .recovery_executor import RecoveryExecutor
 from .recovery_ladder import RecoveryLadder, LadderConfig
 from .adapter_capabilities import AgentAdapter
 from .recovery_budget import RecoveryBudgetManager
+from .ping_monitor import PingMonitor, PingConfig, InProcessPingTransport, WebSocketPingTransport
 
 
 class StateMachineEvent(Enum):
@@ -192,6 +193,10 @@ class GuardianStateMachine:
         self.on_recovery_action = on_recovery_action
         self.on_recovery_result = on_recovery_result
 
+        # Ping monitor for liveness detection
+        self._ping_monitor: Optional[PingMonitor] = None
+        self._ping_transport: Optional[Any] = None
+
         self.turn_context: Optional[TurnContext] = None
         self.current_failure: Optional[FailureClassification] = None
         self.recovery_history: List[RecoveryAttempt] = []
@@ -300,6 +305,11 @@ class GuardianStateMachine:
         if not self.turn_context: return False
         if self.current_state not in (GuardianState.STREAMING, GuardianState.TOOL_ACTIVE, GuardianState.OBSERVING):
             return False
+        # Check ping monitor first if available
+        if self._ping_monitor and self.turn_context.session_id:
+            if self._ping_monitor.is_stale(self.turn_context.session_id):
+                return True
+        # Fallback to time-based check
         elapsed = time.time() - self.turn_context.last_event_timestamp
         return elapsed > self.stale_threshold
 
@@ -308,6 +318,10 @@ class GuardianStateMachine:
         self._last_event_time = time.time()
         self.transition(StateMachineEvent.USER_MESSAGE_SENT, {"session_id": session_id})
 
+        # Start ping monitoring for this session
+        if self._ping_monitor:
+            self._ping_monitor.start_monitoring(session_id)
+
     def end_turn(self, stop_reason: str = "end_turn", error: str = None):
         if not self.turn_context: return
         self.metrics.total_turns += 1
@@ -315,6 +329,9 @@ class GuardianStateMachine:
         else: self.metrics.failed_turns += 1
         self.transition(StateMachineEvent.TURN_COMPLETE if stop_reason == "end_turn" else StateMachineEvent.TURN_ERROR,
             {"stop_reason": stop_reason, "error": error})
+        # Stop ping monitoring for this session
+        if self._ping_monitor and self.turn_context:
+            self._ping_monitor.stop_monitoring(self.turn_context.session_id)
         self.turn_context = None
 
     def _handle_failure(self, data: dict = None) -> bool:

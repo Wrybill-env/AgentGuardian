@@ -28,6 +28,7 @@ from ..core.adapter_capabilities import (
     AgentAdapter,
     GOOSE_CAPABILITIES,
 )
+from ..core.ping_monitor import PingMonitor, PingConfig, WebSocketPingTransport, create_goose_ping_monitor
 from ..logging import get_logger
 
 from .protocol import (
@@ -70,6 +71,9 @@ class GooseAdapter(AgentAdapter):
         self.connection_info: Optional[GooseConnectionInfo] = None
         self._running = False
         self._receive_task: Optional[asyncio.Task] = None
+
+        # Ping monitor for liveness detection
+        self._ping_monitor: Optional[PingMonitor] = None
 
         # Recovery action implementations
         self._recovery_actions = {
@@ -134,7 +138,28 @@ class GooseAdapter(AgentAdapter):
         )
 
         self._running = True
+
+        # Initialize and start ping monitor
+        if self.observer and self.observer._ws:
+            ws_dict = {"default": self.observer._ws}
+            self._ping_monitor = create_goose_ping_monitor(
+                ws_dict=ws_dict,
+                stale_threshold=self.config.stale_threshold,
+                ping_interval=30.0,
+                on_stale=self._on_ping_stale,
+            )
+            await self._ping_monitor.start()
+
         return True
+
+    def _on_ping_stale(self, session_id: str, reason: str):
+        """Handle stale session detected by ping monitor."""
+        logger.warning(f"Ping monitor detected stale session {session_id}: {reason}")
+        # Forward to failure handler via guardian
+        self.guardian.handle_event(StateMachineEvent.FAILURE_DETECTED, {
+            "error_message": f"PING_STALE: {reason}",
+            "details": {"session_id": session_id},
+        })
     
     def get_observer(self) -> Optional["GooseObserver"]:
         """Get the observer for accessing stream state."""

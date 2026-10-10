@@ -26,6 +26,7 @@ from guardian.core.adapter_capabilities import (
     AdapterCapability,
     HERMES_CAPABILITIES,
 )
+from guardian.core.ping_monitor import PingMonitor, PingConfig, InProcessPingTransport, create_hermes_ping_monitor
 from guardian.logging import get_logger
 
 from .observer import HermesObserver, HermesSessionState, run_hermes_observer
@@ -76,6 +77,9 @@ class HermesAdapter(AgentAdapter):
         self.safety_gate = HermesSafetyGate(config.safety_mode)
         self.current_state = GuardianState.IDLE
 
+        # Ping monitor for liveness detection
+        self._ping_monitor: Optional[PingMonitor] = None
+
         # Declare capabilities
         self._capabilities = AdapterCapabilities(
             adapter_name="hermes",
@@ -111,16 +115,51 @@ class HermesAdapter(AgentAdapter):
             self._connected = True
             await self._transition_state(GuardianState.OBSERVING)
             logger.info("Hermes adapter connected (in-process observer attached)")
+
+            # Initialize and start ping monitor
+            self._ping_monitor = create_hermes_ping_monitor(
+                agent=self._agent,
+                stale_threshold=self.config.stale_threshold,
+                ping_interval=30.0,
+                on_stale=self._on_ping_stale_sync,
+            )
+            await self._ping_monitor.start()
+
             return True
         except Exception as e:
             logger.error(f"Failed to attach Hermes observer: {e}")
             return False
+
+    async def _on_ping_stale(self, session_id: str, reason: str):
+        """Handle stale session detected by ping monitor."""
+        logger.warning(f"Ping monitor detected stale session {session_id}: {reason}")
+        # Forward to failure handler
+        for callback in self._failure_callbacks:
+            try:
+                await callback(f"PING_STALE: {reason}", {"session_id": session_id})
+            except Exception as e:
+                logger.error(f"Failure callback error: {e}")
+
+    def _on_ping_stale_sync(self, session_id: str, reason: str):
+        """Synchronous wrapper for ping monitor stale callback."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._on_ping_stale(session_id, reason))
+            else:
+                loop.run_until_complete(self._on_ping_stale(session_id, reason))
+        except Exception as e:
+            logger.error(f"Failed to schedule ping stale callback: {e}")
 
     async def disconnect(self):
         """Disconnect from Hermes agent."""
         if self.observer:
             self.observer.detach()
             self.observer = None
+        if self._ping_monitor:
+            await self._ping_monitor.stop()
+            self._ping_monitor = None
         self._connected = False
         await self._transition_state(GuardianState.IDLE)
         logger.info("Hermes adapter disconnected")
