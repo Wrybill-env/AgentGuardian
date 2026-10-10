@@ -178,6 +178,9 @@ def create_mock_plan(
     safety_reason: str = "Safe to retry",
     blocking_factors: List[str] = None,
     budget_manager: RecoveryBudgetManager = None,
+    # Failure classification parameters
+    retryable: bool = True,
+    replay_safe: bool = True,
     # Planning-time state (for revalidation)
     planning_assistant_chunks: int = 0,
     planning_tools_started: int = 0,
@@ -188,8 +191,8 @@ def create_mock_plan(
     """Create a mock recovery plan."""
     classification = FailureClassification(
         failure_type=failure_type,
-        retryable=True,
-        replay_safe=True,
+        retryable=retryable,
+        replay_safe=replay_safe,
         requires_human=False,
         recommended_action=action,
         confidence=0.9,
@@ -1167,19 +1170,221 @@ class TestTOCTOURaceClosure:
             safety_reason="No side effects observed",
             budget_manager=budget_manager,
         )
-        
+
         current_state = create_mock_session(
             assistant_chunks=0,
             tools_started=0,
             partial_tool_names=[],
         )
         current_stream = {"partial_tool_names": []}
-        
+
         result = await executor.execute_plan(plan, adapter, current_state, current_stream)
-        
+
         assert result.result == ExecutionResult.VERIFICATION_PASSED
         assert result.success is True
         assert result.adapter_result is True
+
+
+# =============================================================================
+# Retry Eligibility Tests (Build #26 - Separation of retryable vs replay_safe)
+# =============================================================================
+
+class TestRetryEligibility:
+    """Tests for the new retry eligibility check in RecoveryExecutor.
+    
+    This verifies that retry actions (WAIT_AND_RETRY, RECONNECT_ACP, etc.) 
+    are blocked when the failure is NOT technically retryable (auth failures, 
+    config errors, cancellations) but allowed when technically retryable.
+    """
+
+    @pytest.fixture
+    def executor(self):
+        safety_gate = SafetyGate(SafetyMode.AUTO_RECOVER)
+        budget_manager = RecoveryBudgetManager()
+        return RecoveryExecutor(
+            safety_gate=safety_gate,
+            budget_manager=budget_manager,
+            default_mode=SafetyMode.AUTO_RECOVER,
+        )
+
+    @pytest.fixture
+    def budget_manager(self, executor):
+        return executor.budget_manager
+
+    @pytest.fixture
+    def adapter(self):
+        adapter = MockAdapter()
+        adapter.set_capability(AdapterCapability.RETRY_REQUEST, True, "Implemented")
+        adapter.set_capability(AdapterCapability.RECONNECT_STREAM, True, "Implemented")
+        adapter.set_verify_result(RecoveryAction.WAIT_AND_RETRY, True)
+        adapter.set_verify_result(RecoveryAction.RECONNECT_STREAM, True)
+        adapter.set_verify_result(RecoveryAction.HUMAN_INTERVENTION, True)
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_retry_action_allowed_when_technically_retryable(self, executor, adapter, budget_manager):
+        """WAIT_AND_RETRY allowed when failure is technically retryable (rate limit, network)."""
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.RATE_LIMIT,
+            retryable=True,
+            replay_safe=True,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_plan(plan, adapter, current_state, current_stream)
+
+        # Should pass retry eligibility check and proceed to execution
+        assert result.result in (ExecutionResult.VERIFICATION_PASSED, ExecutionResult.EXECUTION_SUCCEEDED, ExecutionResult.NOT_PROVEN)
+        assert result.success is True or result.result == ExecutionResult.NOT_PROVEN
+
+    @pytest.mark.asyncio
+    async def test_retry_action_blocked_when_not_technically_retryable_auth_failure(self, executor, adapter, budget_manager):
+        """WAIT_AND_RETRY blocked for auth failure (not technically retryable)."""
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,
+            replay_safe=False,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_plan(plan, adapter, current_state, current_stream)
+
+        # Should be blocked by retry eligibility check
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert result.success is False
+        assert "not technically retryable" in result.message
+        assert "authentication_failure" in result.message
+
+    @pytest.mark.asyncio
+    async def test_retry_action_blocked_when_not_technically_retryable_config_error(self, executor, adapter, budget_manager):
+        """WAIT_AND_RETRY blocked for config error (not technically retryable)."""
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.INVALID_CONFIGURATION,
+            retryable=False,
+            replay_safe=False,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_plan(plan, adapter, current_state, current_stream)
+
+        # Should be blocked by retry eligibility check
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert result.success is False
+        assert "not technically retryable" in result.message
+        assert "invalid_configuration" in result.message
+
+    @pytest.mark.asyncio
+    async def test_retry_action_blocked_when_not_technically_retryable_user_cancelled(self, executor, adapter, budget_manager):
+        """WAIT_AND_RETRY blocked for user cancellation (not technically retryable)."""
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.USER_CANCELLED,
+            retryable=False,
+            replay_safe=False,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_plan(plan, adapter, current_state, current_stream)
+
+        # Should be blocked by retry eligibility check
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert result.success is False
+        assert "not technically retryable" in result.message
+        assert "user_cancelled" in result.message
+
+    @pytest.mark.asyncio
+    async def test_reconnect_acp_blocked_when_not_technically_retryable(self, executor, adapter, budget_manager):
+        """RECONNECT_ACP blocked for auth failure (not technically retryable)."""
+        plan = create_mock_plan(
+            action=RecoveryAction.RECONNECT_STREAM,  # Maps to RECONNECT_ACP capability
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,
+            replay_safe=False,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_plan(plan, adapter, current_state, current_stream)
+
+        # Should be blocked by retry eligibility check
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert result.success is False
+        assert "not technically retryable" in result.message
+
+    @pytest.mark.asyncio
+    async def test_non_retry_action_no_eligibility_check(self, executor, adapter, budget_manager):
+        """HUMAN_INTERVENTION (non-retry action) does not require retry eligibility check."""
+        plan = create_mock_plan(
+            action=RecoveryAction.HUMAN_INTERVENTION,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,  # Even though not retryable, HUMAN_INTERVENTION should not be blocked
+            replay_safe=False,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_plan(plan, adapter, current_state, current_stream)
+
+        # Should NOT be blocked by retry eligibility check
+        # HUMAN_INTERVENTION is not a retry action
+        assert result.result != ExecutionResult.SAFETY_BLOCKED
+        # It will be blocked by other checks (no verification for HUMAN_INTERVENTION in mock)
+        # but the retry eligibility check should pass
 
 
 if __name__ == "__main__":

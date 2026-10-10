@@ -18,6 +18,7 @@ from .types import (
     RecoveryAction,
     FailureType,
     TurnContext,
+    FailureClassification,
 )
 from .safety_gate import SafetyGate, SafetyCheckResult
 from .recovery_budget import RecoveryBudget, RecoveryBudgetManager, BudgetExhaustedReason, RecoveryBudgetConfig
@@ -115,61 +116,66 @@ class RecoveryExecutor:
         self.default_mode = default_mode
     
     async def execute_plan(
-        self,
-        plan: "RecoveryPlan",
-        adapter: AgentAdapter,
-        current_session_state: TurnContext,
-        current_stream_state: Optional[Dict[str, Any]] = None,
-    ) -> RecoveryExecutionResult:
-        """
-        Execute a recovery plan with full safety revalidation.
-        
-        This is the main entry point. It will:
-        1. Check budget
-        2. Check mode (OBSERVE_ONLY blocks execution)
-        3. Revalidate safety with CURRENT state
-        4. Check adapter capability
-        5. Execute via adapter
-        6. Verify result
-        7. Return explicit result
-        """
-        
-        # Create execution context with state snapshot
-        exec_context = self._create_execution_context(
-            plan, adapter, current_session_state, current_stream_state
-        )
-        
-        # Step 1: Check budget
-        budget_result = self._check_budget(exec_context)
-        if budget_result.result != ExecutionResult.EXECUTED:
-            return budget_result
-        
-        # Step 2: Check mode
-        mode_result = self._check_mode(exec_context)
-        if mode_result.result != ExecutionResult.EXECUTED:
-            return mode_result
-        
-        # Step 3: CRITICAL - Revalidate safety with CURRENT state
-        revalidation_result = self._revalidate_safety(
-            exec_context, current_session_state, current_stream_state
-        )
-        if revalidation_result.result != ExecutionResult.EXECUTED:
-            return revalidation_result
-        
-        # Step 4: Check adapter capability
-        capability_result = self._check_capability(exec_context, adapter)
-        if capability_result.result != ExecutionResult.EXECUTED:
-            return capability_result
-        
-        # Step 5: Execute via adapter
-        execution_result = await self._execute_action(exec_context, adapter, current_session_state, current_stream_state)
-        
-        # Step 6: Verify result
-        verification_result = await self._verify_result(
-            execution_result, exec_context, adapter, current_session_state
-        )
-        
-        return verification_result
+            self,
+            plan: "RecoveryPlan",
+            adapter: AgentAdapter,
+            current_session_state: TurnContext,
+            current_stream_state: Optional[Dict[str, Any]] = None,
+        ) -> RecoveryExecutionResult:
+            """
+            Execute a recovery plan with full safety revalidation.
+
+            This is the main entry point. It will:
+            1. Check budget
+            2. Check mode (OBSERVE_ONLY blocks execution)
+            3. Revalidate safety with CURRENT state
+            4. Check adapter capability
+            5. Execute via adapter
+            6. Verify result
+            7. Return explicit result
+            """
+
+            # Create execution context with state snapshot
+            exec_context = self._create_execution_context(
+                plan, adapter, current_session_state, current_stream_state
+            )
+
+            # Step 1: Check budget
+            budget_result = self._check_budget(exec_context)
+            if budget_result.result != ExecutionResult.EXECUTED:
+                return budget_result
+
+            # Step 2: Check mode
+            mode_result = self._check_mode(exec_context)
+            if mode_result.result != ExecutionResult.EXECUTED:
+                return mode_result
+
+            # Step 3: CRITICAL - Revalidate safety with CURRENT state
+            revalidation_result = self._revalidate_safety(
+                exec_context, current_session_state, current_stream_state
+            )
+            if revalidation_result.result != ExecutionResult.EXECUTED:
+                return revalidation_result
+
+            # Step 4: Check adapter capability
+            capability_result = self._check_capability(exec_context, adapter)
+            if capability_result.result != ExecutionResult.EXECUTED:
+                return capability_result
+
+            # Step 5: Check retry eligibility for retry actions
+            retry_check = self._check_retry_eligibility(exec_context, plan)
+            if retry_check.result != ExecutionResult.EXECUTED:
+                return retry_check
+
+            # Step 6: Execute via adapter
+            execution_result = await self._execute_action(exec_context, adapter, current_session_state, current_stream_state)
+
+            # Step 7: Verify result
+            verification_result = await self._verify_result(
+                execution_result, exec_context, adapter, current_session_state
+            )
+
+            return verification_result
     
     def _create_execution_context(
         self,
@@ -493,7 +499,75 @@ class RecoveryExecutor:
             success=True,
             message="Capability check passed",
         )
-    
+
+    def _check_retry_eligibility(
+            self,
+            ctx: RecoveryExecutionContext,
+            plan: "RecoveryPlan",
+        ) -> RecoveryExecutionResult:
+            """
+            Check if the failure is technically retryable for retry-type actions.
+
+            This is a critical safety check: we only allow retry actions (WAIT_AND_RETRY,
+            RECONNECT_ACP, CANCEL_AND_REPLAY, RELOAD_SESSION, FORK_SESSION) when the
+            failure classification indicates the failure is technically retryable.
+
+            This prevents retries for auth failures, config errors, user cancellations, etc.
+            """
+
+            # Actions that require technical retry eligibility
+            retry_actions = {
+                RecoveryAction.WAIT_AND_RETRY,
+                RecoveryAction.RECONNECT_STREAM,
+                RecoveryAction.RECONNECT_ACP,
+                RecoveryAction.CANCEL_AND_REPLAY,
+                RecoveryAction.RELOAD_SESSION,
+                RecoveryAction.FORK_SESSION,
+            }
+
+            # If action is not a retry action, no retry eligibility check needed
+            if ctx.action not in retry_actions:
+                return RecoveryExecutionResult(
+                    result=ExecutionResult.EXECUTED,
+                    action=ctx.action,
+                    success=True,
+                    message="Action does not require retry eligibility check",
+                )
+
+            # Get failure classification from plan
+            failure_classification = plan.failure_classification
+            if not failure_classification:
+                return RecoveryExecutionResult(
+                    result=ExecutionResult.SAFETY_BLOCKED,
+                    action=ctx.action,
+                    success=False,
+                    message="No failure classification available for retry eligibility check",
+                    details={"action": ctx.action.value, "requires_retry_eligible": True},
+                )
+
+            # Check technical retry eligibility
+            if not getattr(failure_classification, 'retryable', False):
+                return RecoveryExecutionResult(
+                    result=ExecutionResult.SAFETY_BLOCKED,
+                    action=ctx.action,
+                    success=False,
+                    message=f"Failure type {failure_classification.failure_type.value} is not technically retryable - retry action blocked",
+                    details={
+                        "action": ctx.action.value,
+                        "failure_type": failure_classification.failure_type.value,
+                        "retryable": getattr(failure_classification, 'retryable', False),
+                        "replay_safe": getattr(failure_classification, 'replay_safe', False),
+                        "requires_retry_eligible": True,
+                    },
+                )
+
+            return RecoveryExecutionResult(
+                result=ExecutionResult.EXECUTED,
+                action=ctx.action,
+                success=True,
+                message="Retry eligibility check passed",
+            )
+
     async def _execute_action(
         self,
         ctx: RecoveryExecutionContext,
