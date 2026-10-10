@@ -1,13 +1,4 @@
-"""
-Guardian State Machine - Core watchdog logic.
-
-Orchestrates the complete Guardian lifecycle:
-- Connection management
-- Turn observation
-- Failure detection
-- Recovery coordination
-- Verification
-"""
+"""Guardian State Machine - Core watchdog logic."""
 
 import asyncio
 import time
@@ -31,12 +22,12 @@ from .failure_classifier import FailureClassifier
 from .safety_gate import SafetyGate, SafetyVerdict
 from .backoff import BackoffStrategy, BackoffConfig, DEFAULT_BACKOFF
 from .recovery_executor import RecoveryExecutor
+from .recovery_ladder import RecoveryLadder, LadderConfig
 from .adapter_capabilities import AgentAdapter
 from .recovery_budget import RecoveryBudgetManager
 
 
 class StateMachineEvent(Enum):
-    """Events that trigger state transitions."""
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
     USER_MESSAGE_SENT = "user_message_sent"
@@ -62,7 +53,6 @@ class StateMachineEvent(Enum):
 
 @dataclass
 class StateTransition:
-    """Record of a state transition."""
     from_state: GuardianState
     to_state: GuardianState
     event: StateMachineEvent
@@ -71,18 +61,8 @@ class StateTransition:
 
 
 class GuardianStateMachine:
-    """
-    Core state machine for Agent Guardian.
-    
-    Manages the complete lifecycle of observing and optionally
-    recovering an agent session.
-    """
-    
-    # Valid state transitions
     VALID_TRANSITIONS = {
-        GuardianState.IDLE: {
-            StateMachineEvent.CONNECTED: GuardianState.OBSERVING,
-        },
+        GuardianState.IDLE: {StateMachineEvent.CONNECTED: GuardianState.OBSERVING},
         GuardianState.OBSERVING: {
             StateMachineEvent.USER_MESSAGE_SENT: GuardianState.STREAMING,
             StateMachineEvent.DISCONNECTED: GuardianState.IDLE,
@@ -159,7 +139,7 @@ class GuardianStateMachine:
             StateMachineEvent.DISCONNECTED: GuardianState.IDLE,
         },
     }
-    
+
     def __init__(
         self,
         safety_mode: SafetyMode = SafetyMode.OBSERVE_ONLY,
@@ -174,355 +154,229 @@ class GuardianStateMachine:
         self.current_state = GuardianState.IDLE
         self.safety_mode = safety_mode
         self.stale_threshold = stale_threshold
-        
-        # Components
+
         self.failure_classifier = FailureClassifier()
         self.safety_gate = SafetyGate(safety_mode)
         self.backoff = BackoffStrategy(backoff_config or DEFAULT_BACKOFF)
-        
-        # Recovery executor
+        self.ladder = RecoveryLadder(LadderConfig(
+            cycle_delays=[15.0, 30.0, 60.0, 60.0, 60.0],
+            jitter_ratio=0.2,
+            jitter_type="uniform",
+            respect_retry_after=True,
+            max_retry_after=120.0,
+            max_cycles=5,
+            require_no_visible_output=True,
+            require_no_tool_activity=True,
+            eligible_failure_types=[
+                "network_transient",
+                "rate_limit",
+                "transient_provider",
+                "stream_stale",
+                "connection_reset",
+                "timeout",
+                "server_error",
+            ],
+        ))
+
         self.recovery_executor = RecoveryExecutor(
             safety_gate=self.safety_gate,
             budget_manager=RecoveryBudgetManager(),
+            ladder=self.ladder,
             default_mode=safety_mode,
         )
-        
-        # Adapter (optional, for AUTO_RECOVER mode)
+
         self.adapter = adapter
-        
-        # Observer (optional, for partial tool state)
         self.observer = None
-        
-        # Callbacks (kept for backward compatibility)
         self.on_state_change = on_state_change
         self.on_failure = on_failure
         self.on_recovery_action = on_recovery_action
         self.on_recovery_result = on_recovery_result
-        
-        # State tracking
+
         self.turn_context: Optional[TurnContext] = None
         self.current_failure: Optional[FailureClassification] = None
         self.recovery_history: List[RecoveryAttempt] = []
         self.transition_history: List[StateTransition] = []
         self.metrics = GuardianMetrics()
-        
-        # Timing
+
         self._last_event_time = time.time()
         self._stale_check_task: Optional[asyncio.Task] = None
         self._running = False
-    
+
     @property
     def state(self) -> GuardianState:
         return self.current_state
-    
+
     def transition(self, event: StateMachineEvent, details: dict = None) -> bool:
-        """
-        Attempt a state transition.
-        
-        Returns True if transition was valid and executed.
-        """
         valid_next = self.VALID_TRANSITIONS.get(self.current_state, {})
         next_state = valid_next.get(event)
-        
         if next_state is None:
-            # Invalid transition - log but don't crash
             print(f"Invalid transition: {self.current_state.value} --{event.value}--> ???")
             return False
-        
         old_state = self.current_state
         self.current_state = next_state
-        
-        # Record transition
         transition = StateTransition(
-            from_state=old_state,
-            to_state=next_state,
-            event=event,
-            timestamp=datetime.now(),
-            details=details or {},
+            from_state=old_state, to_state=next_state, event=event,
+            timestamp=datetime.now(), details=details or {},
         )
         self.transition_history.append(transition)
-        
-        # Notify callback
         if self.on_state_change:
             try:
                 self.on_state_change(old_state, next_state, event)
             except Exception as e:
                 print(f"State change callback error: {e}")
-        
         return True
-    
+
     def handle_event(self, event: StateMachineEvent, data: dict = None) -> bool:
-        """
-        Handle an incoming event and update state accordingly.
-        
-        This is the main entry point for external events.
-        """
-        # Update turn context based on event
         if self.turn_context:
             self._update_turn_context(event, data)
-        
-        # Check for stale stream
         if self._check_stale():
             self.transition(StateMachineEvent.STALE_DETECTED, {"detected_at": time.time()})
-            # Also classify as stale stream failure
             self._handle_failure({"error_message": f"Stream stale - no events for {self.stale_threshold}s"})
             return True
-        
-        # Check for disconnect
         if event == StateMachineEvent.DISCONNECTED:
             self.transition(StateMachineEvent.DISCONNECTED, {})
             return True
-        
-        # Handle specific events
-        if event in (
-            StateMachineEvent.TURN_ERROR,
-            StateMachineEvent.TURN_CANCELLED,
-            StateMachineEvent.TURN_MAX_TURNS,
-        ):
-            # These are terminal turn events that may indicate failure
+        if event in (StateMachineEvent.TURN_ERROR, StateMachineEvent.TURN_CANCELLED, StateMachineEvent.TURN_MAX_TURNS):
             self.transition(event, data)
             return True
-        
         elif event == StateMachineEvent.FAILURE_DETECTED:
-            # Classify and handle failure
             return self._handle_failure(data)
-        
         elif event == StateMachineEvent.BACKOFF_COMPLETE:
-            # Backoff complete, attempt recovery
             return self._attempt_recovery()
-        
         elif event == StateMachineEvent.RECOVERY_COMPLETE:
             return self._verify_recovery(data)
-        
         elif event == StateMachineEvent.RECOVERY_FAILED:
             return self._handle_recovery_failure(data)
-        
-        # Default transition
         return self.transition(event, data)
-    
+
     def _update_turn_context(self, event: StateMachineEvent, data: dict = None):
-            """Update turn context based on observed event."""
-            if not self.turn_context:
-                return
+        if not self.turn_context: return
+        data = data or {}
+        if event == StateMachineEvent.USER_MESSAGE_SENT:
+            self.turn_context.phase = TurnPhase.USER_MESSAGE_SENT
+            self.turn_context.user_prompt = data.get("prompt")
+            self.turn_context.first_chunk_time = None
+            self.turn_context.last_assistant_chunk_time = None
+            self.turn_context.increment_generation()
+        elif event == StateMachineEvent.ASSISTANT_CHUNK:
+            if self.turn_context.phase == TurnPhase.USER_MESSAGE_SENT:
+                self.turn_context.phase = TurnPhase.ASSISTANT_STREAMING
+                self.turn_context.first_chunk_time = time.time()
+            self.turn_context.assistant_chunks_received += 1
+            self.turn_context.last_assistant_chunk_time = time.time()
+            self.turn_context.last_event_time = time.time()
+            self.turn_context.increment_generation()
+        elif event == StateMachineEvent.TOOL_STARTED:
+            tool_call_id = data.get("tool_call_id")
+            if tool_call_id and tool_call_id not in self.turn_context._seen_tool_call_ids:
+                self.turn_context._seen_tool_call_ids.add(tool_call_id)
+                self.turn_context.tool_calls_started += 1
+            self.turn_context.phase = TurnPhase.TOOL_EXECUTING
+            self.turn_context.last_tool_event_time = time.time()
+            self.turn_context.last_event_time = time.time()
+            self.turn_context.increment_generation()
+        elif event in (StateMachineEvent.TOOL_COMPLETED, StateMachineEvent.TOOL_FAILED):
+            tool_call_id = data.get("tool_call_id")
+            if event == StateMachineEvent.TOOL_COMPLETED:
+                if tool_call_id and tool_call_id not in self.turn_context._completed_tool_call_ids:
+                    self.turn_context._completed_tool_call_ids.add(tool_call_id)
+                    self.turn_context.tool_calls_completed += 1
+            else:
+                if tool_call_id and tool_call_id not in self.turn_context._failed_tool_call_ids:
+                    self.turn_context._failed_tool_call_ids.add(tool_call_id)
+                    self.turn_context.tool_calls_failed += 1
+            self.turn_context.last_tool_event_time = time.time()
+            self.turn_context.last_event_time = time.time()
+            self.turn_context.increment_generation()
+        elif event in (StateMachineEvent.TURN_COMPLETE, StateMachineEvent.TURN_ERROR,
+                       StateMachineEvent.TURN_CANCELLED, StateMachineEvent.TURN_MAX_TURNS):
+            self.turn_context.phase = TurnPhase.TURN_ENDING
+            self.turn_context.stop_reason = data.get("stop_reason") if data else None
+            self.turn_context.error_message = data.get("error_message") if data else None
+            self.turn_context.last_event_time = time.time()
+            self.turn_context.increment_generation()
 
-            data = data or {}
-
-            if event == StateMachineEvent.USER_MESSAGE_SENT:
-                self.turn_context.phase = TurnPhase.USER_MESSAGE_SENT
-                self.turn_context.user_prompt = data.get("prompt")
-                self.turn_context.first_chunk_time = None
-                self.turn_context.last_assistant_chunk_time = None
-                self.turn_context.increment_generation()
-
-            elif event == StateMachineEvent.ASSISTANT_CHUNK:
-                if self.turn_context.phase == TurnPhase.USER_MESSAGE_SENT:
-                    self.turn_context.phase = TurnPhase.ASSISTANT_STREAMING
-                    self.turn_context.first_chunk_time = time.time()
-                self.turn_context.assistant_chunks_received += 1
-                self.turn_context.last_assistant_chunk_time = time.time()
-                self.turn_context.last_event_time = time.time()
-                self.turn_context.increment_generation()
-
-            elif event == StateMachineEvent.TOOL_STARTED:
-                # Deduplication: only count unique tool_call_id
-                tool_call_id = data.get("tool_call_id")
-                if tool_call_id and tool_call_id not in self.turn_context._seen_tool_call_ids:
-                    self.turn_context._seen_tool_call_ids.add(tool_call_id)
-                    self.turn_context.tool_calls_started += 1
-                self.turn_context.phase = TurnPhase.TOOL_EXECUTING
-                self.turn_context.last_tool_event_time = time.time()
-                self.turn_context.last_event_time = time.time()
-                self.turn_context.increment_generation()
-
-            elif event in (StateMachineEvent.TOOL_COMPLETED, StateMachineEvent.TOOL_FAILED):
-                tool_call_id = data.get("tool_call_id")
-                if event == StateMachineEvent.TOOL_COMPLETED:
-                    # Only count if not already completed
-                    if tool_call_id and tool_call_id not in self.turn_context._completed_tool_call_ids:
-                        self.turn_context._completed_tool_call_ids.add(tool_call_id)
-                        self.turn_context.tool_calls_completed += 1
-                else:
-                    # Only count if not already failed
-                    if tool_call_id and tool_call_id not in self.turn_context._failed_tool_call_ids:
-                        self.turn_context._failed_tool_call_ids.add(tool_call_id)
-                        self.turn_context.tool_calls_failed += 1
-                self.turn_context.last_tool_event_time = time.time()
-                self.turn_context.last_event_time = time.time()
-                self.turn_context.increment_generation()
-
-            elif event in (
-                StateMachineEvent.TURN_COMPLETE,
-                StateMachineEvent.TURN_ERROR,
-                StateMachineEvent.TURN_CANCELLED,
-                StateMachineEvent.TURN_MAX_TURNS,
-            ):
-                self.turn_context.phase = TurnPhase.TURN_ENDING
-                self.turn_context.stop_reason = data.get("stop_reason") if data else None
-                self.turn_context.error_message = data.get("error_message") if data else None
-                self.turn_context.last_event_time = time.time()
-                self.turn_context.increment_generation()
-    
     def _check_stale(self) -> bool:
-        """Check if stream is stale (no events for threshold period)."""
-        if not self.turn_context:
+        if not self.turn_context: return False
+        if self.current_state not in (GuardianState.STREAMING, GuardianState.TOOL_ACTIVE, GuardianState.OBSERVING):
             return False
-        
-        if self.current_state not in (
-            GuardianState.STREAMING,
-            GuardianState.TOOL_ACTIVE,
-            GuardianState.OBSERVING,
-        ):
-            return False
-        
         elapsed = time.time() - self.turn_context.last_event_timestamp
         return elapsed > self.stale_threshold
-    
+
     def start_turn(self, session_id: str, run_id: str = None, user_prompt: str = None):
-        """Start tracking a new turn."""
-        self.turn_context = TurnContext(
-            session_id=session_id,
-            run_id=run_id,
-            user_prompt=user_prompt,
-        )
+        self.turn_context = TurnContext(session_id=session_id, run_id=run_id, user_prompt=user_prompt)
         self._last_event_time = time.time()
         self.transition(StateMachineEvent.USER_MESSAGE_SENT, {"session_id": session_id})
-    
+
     def end_turn(self, stop_reason: str = "end_turn", error: str = None):
-        """End current turn and reset turn context."""
-        if not self.turn_context:
-            return
-        
-        # Update metrics
+        if not self.turn_context: return
         self.metrics.total_turns += 1
-        if stop_reason == "end_turn":
-            self.metrics.successful_turns += 1
-        else:
-            self.metrics.failed_turns += 1
-        
-        # Complete turn
-        self.transition(
-            StateMachineEvent.TURN_COMPLETE if stop_reason == "end_turn" 
-            else StateMachineEvent.TURN_ERROR,
-            {"stop_reason": stop_reason, "error": error}
-        )
-        
-        # Reset turn context
+        if stop_reason == "end_turn": self.metrics.successful_turns += 1
+        else: self.metrics.failed_turns += 1
+        self.transition(StateMachineEvent.TURN_COMPLETE if stop_reason == "end_turn" else StateMachineEvent.TURN_ERROR,
+            {"stop_reason": stop_reason, "error": error})
         self.turn_context = None
-    
+
     def _handle_failure(self, data: dict = None) -> bool:
-        """Classify failure and determine recovery path."""
         data = data or {}
-        
-        # Extract failure signals
         error_message = data.get("error_message")
         http_status = data.get("http_status")
         stop_reason = data.get("stop_reason")
-        
-        # Classify
         classification = self.failure_classifier.classify(
-            error_message=error_message,
-            http_status=http_status,
-            stop_reason=stop_reason,
-            turn_context=self.turn_context,
-        )
-        
+            error_message=error_message, http_status=http_status,
+            stop_reason=stop_reason, turn_context=self.turn_context)
         self.current_failure = classification
-        
-        # Notify failure callback
         if self.on_failure:
-            try:
-                self.on_failure(classification, self.turn_context)
-            except Exception as e:
-                print(f"Failure callback error: {e}")
-        
-        # Log failure
-        print(f"FAILURE DETECTED: {classification.failure_type.value} "
-              f"(retryable={classification.retryable}, "
-              f"replay_safe={classification.replay_safe}, "
-              f"action={classification.recommended_action.value})")
-        
-        # Determine if we should attempt recovery
+            try: self.on_failure(classification, self.turn_context)
+            except Exception as e: print(f"Failure callback error: {e}")
+        print(f"FAILURE DETECTED: {classification.failure_type.value} (retryable={classification.retryable}, replay_safe={classification.replay_safe}, action={classification.recommended_action.value})")
         if classification.recommended_action == RecoveryAction.NO_SAFE_RECOVERY:
-            self.transition(StateMachineEvent.FAILURE_DETECTED, {
-                "failure": classification.failure_type.value,
-                "reason": "No safe recovery",
-            })
-            self.transition(StateMachineEvent.MANUAL_OVERRIDE, {
-                "reason": "No safe recovery path",
-            })
+            self.transition(StateMachineEvent.FAILURE_DETECTED, {"failure": classification.failure_type.value, "reason": "No safe recovery"})
+            self.transition(StateMachineEvent.MANUAL_OVERRIDE, {"reason": "No safe recovery path"})
             return True
-        
         if classification.recommended_action == RecoveryAction.HUMAN_INTERVENTION:
-            self.transition(StateMachineEvent.FAILURE_DETECTED, {
-                "failure": classification.failure_type.value,
-            })
-            # In DRY_RUN or AUTO_RECOVER mode, we can note what would happen
+            self.transition(StateMachineEvent.FAILURE_DETECTED, {"failure": classification.failure_type.value})
             if self.safety_mode in (SafetyMode.DRY_RUN, SafetyMode.AUTO_RECOVER):
-                print(f"DRY_RUN/AUTO_RECOVER: Would request human intervention for "
-                      f"{classification.failure_type.value}")
-            self.transition(StateMachineEvent.MANUAL_OVERRIDE, {
-                "reason": "Human intervention required",
-            })
+                print(f"DRY_RUN/AUTO_RECOVER: Would request human intervention for {classification.failure_type.value}")
+            self.transition(StateMachineEvent.MANUAL_OVERRIDE, {"reason": "Human intervention required"})
             return True
-        
-        # For retryable failures, transition to POSSIBLE_FAILURE first, then RECOVERY_WAIT
-        if classification.recommended_action in (
-            RecoveryAction.WAIT_AND_RETRY,
-            RecoveryAction.CANCEL_AND_REPLAY,
-        ):
-            # First transition to POSSIBLE_FAILURE
-            self.transition(StateMachineEvent.FAILURE_DETECTED, {
-                "failure": classification.failure_type.value,
-                "backoff_delay": 0,
-            })
-            # Then transition to RECOVERY_WAIT for backoff
-            delay = self.backoff.next_delay()
-            print(f"Starting backoff: {delay:.1f}s (attempt {self.backoff.state.attempt})")
-            self.transition(StateMachineEvent.BACKOFF_COMPLETE, {
-                "failure": classification.failure_type.value,
-                "backoff_delay": delay,
-            })
+        if classification.recommended_action in (RecoveryAction.WAIT_AND_RETRY, RecoveryAction.CANCEL_AND_REPLAY):
+            self.transition(StateMachineEvent.FAILURE_DETECTED, {"failure": classification.failure_type.value, "backoff_delay": 0})
+            visible_output = self.turn_context.assistant_chunks_received > 0 if self.turn_context else False
+            tool_activity = self.turn_context.tool_calls_started > 0 if self.turn_context else False
+            delay = self.ladder.get_next_delay(
+                retry_after=None,
+                visible_output_delivered=visible_output,
+                tool_activity_observed=tool_activity,
+                failure_type=classification.failure_type.value,
+            )
+            if delay < 0:
+                print(f"Recovery ladder not eligible for {classification.failure_type.value}")
+                self.transition(StateMachineEvent.MANUAL_OVERRIDE, {"reason": "Recovery ladder not eligible"})
+                return True
+            print(f"Starting backoff: {delay:.1f}s (cycle {self.ladder.state.current_cycle + 1})")
+            self.transition(StateMachineEvent.BACKOFF_COMPLETE, {"failure": classification.failure_type.value, "backoff_delay": delay})
             return True
-        
         elif classification.recommended_action == RecoveryAction.RECONNECT_ACP:
-            self.transition(StateMachineEvent.FAILURE_DETECTED, {
-                "failure": classification.failure_type.value,
-            })
+            self.transition(StateMachineEvent.FAILURE_DETECTED, {"failure": classification.failure_type.value})
             self._attempt_recovery()
             return True
-        
         elif classification.recommended_action == RecoveryAction.WAIT_FOR_BACKEND:
-            # Switch to waiting state
-            self.transition(StateMachineEvent.FAILURE_DETECTED, {
-                "failure": classification.failure_type.value,
-            })
+            self.transition(StateMachineEvent.FAILURE_DETECTED, {"failure": classification.failure_type.value})
             self.current_state = GuardianState.RECOVERY_WAIT
             return True
-        
         return False
-    
+
     def _attempt_recovery(self) -> bool:
-        """Execute the recommended recovery action via RecoveryExecutor."""
-        if not self.current_failure:
-            return False
-        
+        if not self.current_failure: return False
         action = self.current_failure.recommended_action
-        
-        # In OBSERVE_ONLY mode, don't execute
         if self.safety_mode == SafetyMode.OBSERVE_ONLY:
             print(f"OBSERVE_ONLY: Would attempt {action.value}")
             self.current_state = GuardianState.POSSIBLE_FAILURE
             return False
-        
-        # In DRY_RUN mode, simulate but don't execute
         if self.safety_mode == SafetyMode.DRY_RUN:
             print(f"DRY_RUN: Would attempt {action.value}")
-            # Still check safety but don't execute
-            safety_result = self.safety_gate.check_recovery_action_safety(
-                action=action,
-                turn_context=self.turn_context,
-                failure_classification=self.current_failure,
-            )
+            safety_result = self.safety_gate.check_recovery_action_safety(action=action, turn_context=self.turn_context, failure_classification=self.current_failure)
             if safety_result.verdict == SafetyVerdict.UNSAFE:
                 print(f"RECOVERY BLOCKED (DRY_RUN): {safety_result.reason}")
                 self.current_state = GuardianState.POSSIBLE_FAILURE
@@ -534,40 +388,19 @@ class GuardianStateMachine:
             print(f"DRY_RUN: Would attempt {action.value} (safety={safety_result.verdict.value})")
             self.current_state = GuardianState.POSSIBLE_FAILURE
             return False
-        
-        # AUTO_RECOVER mode - execute via RecoveryExecutor
         if self.adapter is None:
             print("AUTO_RECOVER: No adapter configured, cannot execute recovery")
             self.current_state = GuardianState.POSSIBLE_FAILURE
             return False
-        
         print(f"RECOVERY ATTEMPT: {action.value}")
-        self.transition(StateMachineEvent.RECOVERY_STARTED, {
-            "action": action.value,
-            "failure": self.current_failure.failure_type.value,
-        })
-        
-        # Record attempt
-        attempt = RecoveryAttempt(
-            attempt_number=len(self.recovery_history) + 1,
-            failure_type=self.current_failure.failure_type,
-            action_taken=action,
-            timestamp=datetime.now(),
-            delay_seconds=self.backoff.state.last_delay,
-            success=False,  # Will update after execution
-        )
+        self.transition(StateMachineEvent.RECOVERY_STARTED, {"action": action.value, "failure": self.current_failure.failure_type.value})
+        attempt = RecoveryAttempt(attempt_number=len(self.recovery_history)+1, failure_type=self.current_failure.failure_type, action_taken=action, timestamp=datetime.now(), delay_seconds=self.backoff.state.last_delay, success=False)
         self.recovery_history.append(attempt)
         self.metrics.recovery_attempts += 1
-        
-        # Execute recovery action via RecoveryExecutor
-        # We need to run this async - use the event loop
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # We're in an async context, create a task
                 task = loop.create_task(self._execute_recovery_async())
-                # For sync context, we can't await, so just schedule and return
-                # The actual result will be handled by the task
                 print(f"RECOVERY SCHEDULED: {action.value}")
                 return True
             else:
@@ -577,133 +410,65 @@ class GuardianStateMachine:
             print(f"Recovery execution error: {e}")
             self.current_state = GuardianState.POSSIBLE_FAILURE
             return False
-    
+
     async def _execute_recovery_async(self) -> bool:
-        """Async execution of recovery via RecoveryExecutor."""
-        if not self.current_failure or not self.adapter or not self.turn_context:
-            return False
-        
-        # Create a RecoveryPlan from current state
+        if not self.current_failure or not self.adapter or not self.turn_context: return False
         from .recovery_planner import RecoveryPlanner, RecoveryContext
         from .recovery_ladder import RecoveryLadder, LadderConfig
         from .recovery_budget import RecoveryBudgetManager, RecoveryBudgetConfig
         from .backoff import BackoffStrategy, BackoffConfig
-        
-        # Use existing components or create temporary ones
         ladder = self.ladder if hasattr(self, 'ladder') else RecoveryLadder(LadderConfig())
         budget_manager = self.recovery_executor.budget_manager
         backoff = self.backoff
-        
-        planner = RecoveryPlanner(
-            safety_gate=self.safety_gate,
-            budget_manager=budget_manager,
-            ladder=ladder,
-            backoff=backoff,
-        )
-        
-        # Build recovery context
+        planner = RecoveryPlanner(safety_gate=self.safety_gate, budget_manager=budget_manager, ladder=ladder, backoff=backoff)
         context = RecoveryContext(
-            session=SessionState(  # This would need proper session state
-                session_id=self.turn_context.session_id,
-                turn_states=[],
-                created_at=0,
-            ),
-            current_turn=TurnState(  # Simplified
-                turn_id=self.turn_context.run_id or "unknown",
-                session_id=self.turn_context.session_id,
-                phase=TurnPhase(self.turn_context.phase.value),
-                evidence=None,
-            ),
+            session=SessionState(session_id=self.turn_context.session_id, turn_states=[], created_at=0),
+            current_turn=TurnState(turn_id=self.turn_context.run_id or "unknown", session_id=self.turn_context.session_id, phase=TurnPhase(self.turn_context.phase.value), evidence=None),
             failure_classification=self.current_failure,
             adapter_capabilities={cap.value: True for cap in self.adapter.capabilities.get_available()},
             adapter_name=self.adapter.capabilities.adapter_name,
             safety_mode=self.safety_mode,
         )
-        
         plan = planner.create_plan(context)
-        
-        # Execute via RecoveryExecutor
-        result = await self.recovery_executor.execute_plan(
-            plan=plan,
-            adapter=self.adapter,
-            current_session_state=self.turn_context,
-            current_stream_state={"partial_tool_names": self.observer.get_session_state(self.turn_context.session_id).get_partial_tool_names() if self.observer and self.turn_context else []},
-        )
-        
+        result = await self.recovery_executor.execute_plan(plan=plan, adapter=self.adapter, current_session_state=self.turn_context, current_stream_state={"partial_tool_names": self.observer.get_session_state(self.turn_context.session_id).get_partial_tool_names() if self.observer and self.turn_context else []})
         if result.success:
             self.metrics.successful_recoveries += 1
-            self.transition(StateMachineEvent.RECOVERY_COMPLETE, {
-                "action": action.value,
-                "result": result.result.value,
-            })
+            self.transition(StateMachineEvent.RECOVERY_COMPLETE, {"action": action.value, "result": result.result.value})
             return True
         else:
             self.metrics.failed_recoveries += 1
-            self.transition(StateMachineEvent.RECOVERY_FAILED, {
-                "action": action.value,
-                "error": result.message,
-            })
+            self.transition(StateMachineEvent.RECOVERY_FAILED, {"action": action.value, "error": result.message})
             return False
-    
+
     def _verify_recovery(self, data: dict = None) -> bool:
-        """Verify recovery was successful."""
         data = data or {}
         success = data.get("success", True)
-        
         if success:
             self.metrics.successful_recoveries += 1
             self.transition(StateMachineEvent.VERIFICATION_PASSED, {})
             print("RECOVERY VERIFIED: Success")
             return True
         else:
-            self.transition(StateMachineEvent.VERIFICATION_FAILED, {
-                "reason": data.get("reason", "Verification failed"),
-            })
+            self.transition(StateMachineEvent.VERIFICATION_FAILED, {"reason": data.get("reason", "Verification failed")})
             print("RECOVERY VERIFICATION FAILED")
             return False
-    
+
     def _handle_recovery_failure(self, data: dict = None):
-        """Handle failed recovery attempt."""
         data = data or {}
         error = data.get("error", "Recovery failed")
-        
-        # Check if we've exceeded max attempts
         if not self.backoff.should_retry():
             print(f"MAX RECOVERY ATTEMPTS REACHED: {len(self.recovery_history)}")
             self.current_state = GuardianState.FAILED_PERMANENTLY
             return
-        
-        # Go back to possible failure for next backoff cycle
         self.current_state = GuardianState.POSSIBLE_FAILURE
         print(f"RECOVERY FAILED: {error}, will retry after backoff")
-    
+
     def get_status(self) -> dict:
-        """Get current state machine status."""
         return {
-            "state": self.current_state.value,
-            "safety_mode": self.safety_mode.value,
-            "turn_context": {
-                "session_id": self.turn_context.session_id if self.turn_context else None,
-                "phase": self.turn_context.phase.value if self.turn_context else None,
-                "assistant_chunks": self.turn_context.assistant_chunks_received if self.turn_context else 0,
-                "tool_calls_started": self.turn_context.tool_calls_started if self.turn_context else 0,
-                "safe_to_replay": self.turn_context.is_safe_to_replay() if self.turn_context else True,
-            } if self.turn_context else None,
-            "current_failure": {
-                "type": self.current_failure.failure_type.value,
-                "recommended_action": self.current_failure.recommended_action.value,
-                "retryable": self.current_failure.retryable,
-                "replay_safe": self.current_failure.replay_safe,
-            } if self.current_failure else None,
+            "state": self.current_state.value, "safety_mode": self.safety_mode.value,
+            "turn_context": {"session_id": self.turn_context.session_id if self.turn_context else None, "phase": self.turn_context.phase.value if self.turn_context else None, "assistant_chunks": self.turn_context.assistant_chunks_received if self.turn_context else 0, "tool_calls_started": self.turn_context.tool_calls_started if self.turn_context else 0, "safe_to_replay": self.turn_context.is_safe_to_replay() if self.turn_context else True} if self.turn_context else None,
+            "current_failure": {"type": self.current_failure.failure_type.value, "recommended_action": self.current_failure.recommended_action.value, "retryable": self.current_failure.retryable, "replay_safe": self.current_failure.replay_safe} if self.current_failure else None,
             "backoff": self.backoff.get_status(),
-            "metrics": {
-                "total_turns": self.metrics.total_turns,
-                "successful_turns": self.metrics.successful_turns,
-                "failed_turns": self.metrics.failed_turns,
-                "recovery_attempts": self.metrics.recovery_attempts,
-                "successful_recoveries": self.metrics.successful_recoveries,
-                "failed_recoveries": self.metrics.failed_recoveries,
-            },
-            "recovery_history_count": len(self.recovery_history),
-            "transition_count": len(self.transition_history),
+            "metrics": {"total_turns": self.metrics.total_turns, "successful_turns": self.metrics.successful_turns, "failed_turns": self.metrics.failed_turns, "recovery_attempts": self.metrics.recovery_attempts, "successful_recoveries": self.metrics.successful_recoveries, "failed_recoveries": self.metrics.failed_recoveries},
+            "recovery_history_count": len(self.recovery_history), "transition_count": len(self.transition_history),
         }
