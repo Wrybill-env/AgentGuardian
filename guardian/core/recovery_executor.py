@@ -23,6 +23,7 @@ from .types import (
 from .safety_gate import SafetyGate, SafetyCheckResult
 from .recovery_budget import RecoveryBudget, RecoveryBudgetManager, BudgetExhaustedReason, RecoveryBudgetConfig
 from .recovery_ladder import RecoveryLadder
+from .backoff import BackoffStrategy, BackoffConfig
 from .adapter_capabilities import AdapterCapability, AdapterCapabilities, AgentAdapter
 
 
@@ -108,11 +109,13 @@ class RecoveryExecutor:
         safety_gate: SafetyGate,
         budget_manager: RecoveryBudgetManager,
         ladder: Optional["RecoveryLadder"] = None,
+        backoff: Optional[BackoffStrategy] = None,
         default_mode: SafetyMode = SafetyMode.OBSERVE_ONLY,
     ):
         self.safety_gate = safety_gate
         self.budget_manager = budget_manager
         self.ladder = ladder
+        self.backoff = backoff
         self.default_mode = default_mode
     
     async def execute_plan(
@@ -567,6 +570,80 @@ class RecoveryExecutor:
                 success=True,
                 message="Retry eligibility check passed",
             )
+
+    async def execute_retry_with_backoff(
+        self,
+        plan: "RecoveryPlan",
+        adapter: AgentAdapter,
+        current_session_state: TurnContext,
+        current_stream_state: Optional[Dict[str, Any]] = None,
+        max_attempts: Optional[int] = None,
+    ) -> RecoveryExecutionResult:
+        """
+        Execute a retry-type recovery action with exponential backoff.
+        
+        This method handles the complete retry loop:
+        1. Execute plan (with safety checks)
+        2. If failed and should retry, wait for backoff delay
+        3. Repeat until success, max attempts, or budget exhausted
+        
+        Args:
+            plan: Recovery plan with retry action
+            adapter: Agent adapter
+            current_session_state: Current session state
+            current_stream_state: Current stream state
+            max_attempts: Override max attempts (uses backoff config if None)
+            
+        Returns:
+            Final RecoveryExecutionResult
+        """
+        if not self.backoff:
+            raise ValueError("BackoffStrategy not configured - cannot execute with backoff")
+        
+        # Reset backoff for new sequence
+        self.backoff.reset()
+        
+        max_tries = max_attempts if max_attempts is not None else self.backoff.config.max_attempts
+        if self.backoff.config.indefinite_retry:
+            max_tries = float('inf')
+        
+        attempt = 0
+        last_result = None
+        
+        while attempt < max_tries:
+            # Check if we should continue (budget, backoff)
+            if not self.backoff.should_retry(attempt):
+                break
+            
+            # Execute the plan
+            result = await self.execute_plan(plan, adapter, current_session_state, current_stream_state)
+            last_result = result
+            
+            # If successful, return
+            if result.success and result.result == ExecutionResult.VERIFICATION_PASSED:
+                result.details["backoff_attempts"] = attempt
+                result.details["total_waited"] = self.backoff.get_total_waited()
+                return result
+            
+            # If execution failed but we should retry
+            if result.result in (ExecutionResult.EXECUTION_FAILED, ExecutionResult.NOT_PROVEN, ExecutionResult.VERIFICATION_FAILED):
+                attempt += 1
+                if attempt >= max_tries:
+                    break
+                
+                # Wait for backoff delay
+                delay = self.backoff.next_delay()
+                await asyncio.sleep(delay)
+                continue
+            
+            # For other results (safety blocked, capability unavailable, etc.), don't retry
+            break
+        
+        # Return the last result
+        if last_result:
+            last_result.details["backoff_attempts"] = attempt
+            last_result.details["total_waited"] = self.backoff.get_total_waited()
+        return last_result
 
     async def _execute_action(
         self,

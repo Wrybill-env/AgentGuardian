@@ -31,7 +31,7 @@ from guardian.core.types import (
 from guardian.core.safety_gate import SafetyGate, SafetyCheckResult
 from guardian.core.recovery_budget import RecoveryBudgetManager, RecoveryBudgetConfig
 from guardian.core.recovery_ladder import RecoveryLadder, LadderConfig
-from guardian.core.backoff import BackoffStrategy, BackoffConfig
+from guardian.core.backoff import BackoffStrategy, BackoffConfig, JitterType
 from guardian.core.adapter_capabilities import (
     AdapterCapabilities,
     CapabilityResult,
@@ -1385,6 +1385,196 @@ class TestRetryEligibility:
         assert result.result != ExecutionResult.SAFETY_BLOCKED
         # It will be blocked by other checks (no verification for HUMAN_INTERVENTION in mock)
         # but the retry eligibility check should pass
+
+
+# =============================================================================
+# Backoff Integration Tests (Build #26 Final - Automated Retry with Backoff)
+# =============================================================================
+
+class TestBackoffIntegration:
+    """Tests for the new execute_retry_with_backoff method in RecoveryExecutor.
+    
+    This verifies that retry actions are executed with proper backoff delays
+    and that the retry loop respects budget and max attempts.
+    """
+
+    @pytest.fixture
+    def executor(self):
+        safety_gate = SafetyGate(SafetyMode.AUTO_RECOVER)
+        budget_manager = RecoveryBudgetManager()
+        backoff = BackoffStrategy(BackoffConfig(
+            initial_delay=0.01,  # Very short for tests
+            max_delay=0.1,
+            multiplier=2.0,
+            jitter_type=JitterType.NONE,
+            max_attempts=3,
+        ))
+        return RecoveryExecutor(
+            safety_gate=safety_gate,
+            budget_manager=budget_manager,
+            backoff=backoff,
+            default_mode=SafetyMode.AUTO_RECOVER,
+        )
+
+    @pytest.fixture
+    def budget_manager(self, executor):
+        return executor.budget_manager
+
+    @pytest.fixture
+    def adapter(self):
+        adapter = MockAdapter()
+        adapter.set_capability(AdapterCapability.RETRY_REQUEST, True, "Implemented")
+        adapter.set_verify_result(RecoveryAction.WAIT_AND_RETRY, True)
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_retry_with_backoff_succeeds_on_first_try(self, executor, adapter, budget_manager):
+        """Test that execute_retry_with_backoff returns immediately on success."""
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.RATE_LIMIT,
+            retryable=True,
+            replay_safe=True,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_retry_with_backoff(plan, adapter, current_state, current_stream, max_attempts=3)
+
+        assert result.success is True
+        assert result.result == ExecutionResult.VERIFICATION_PASSED
+        assert result.details.get("backoff_attempts") == 0
+
+    @pytest.mark.asyncio
+    async def test_retry_with_backoff_retries_on_execution_failure(self, executor, adapter, budget_manager):
+        """Test that execute_retry_with_backoff retries on EXECUTION_FAILED."""
+        # Fail first 2 attempts, succeed on 3rd
+        call_count = 0
+        original_execute = adapter.execute_recovery_action
+        
+        async def failing_execute(action, context):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return False  # Fail first 2 attempts
+            return True  # Succeed on 3rd
+        
+        adapter.execute_recovery_action = failing_execute
+
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.RATE_LIMIT,
+            retryable=True,
+            replay_safe=True,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_retry_with_backoff(plan, adapter, current_state, current_stream, max_attempts=3)
+
+        # Should succeed on 3rd attempt
+        assert result.success is True
+        assert result.result == ExecutionResult.VERIFICATION_PASSED
+        assert result.details.get("backoff_attempts") == 2
+        assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_retry_with_backoff_exhausts_max_attempts(self, executor, adapter, budget_manager):
+        """Test that execute_retry_with_backoff stops after max attempts."""
+        # Always fail
+        adapter.set_execute_result(RecoveryAction.WAIT_AND_RETRY, False)
+
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.RATE_LIMIT,
+            retryable=True,
+            replay_safe=True,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_retry_with_backoff(plan, adapter, current_state, current_stream, max_attempts=3)
+
+        # Should fail after 3 attempts
+        assert result.success is False
+        assert result.result == ExecutionResult.EXECUTION_FAILED
+        assert result.details.get("backoff_attempts") == 3
+
+    @pytest.mark.asyncio
+    async def test_retry_with_backoff_respects_retry_eligibility(self, executor, adapter, budget_manager):
+        """Test that retry with backoff still blocks non-retryable failures."""
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="No side effects observed",
+            budget_manager=budget_manager,
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,  # Not technically retryable
+            replay_safe=False,
+        )
+
+        current_state = create_mock_session(
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+        current_stream = {"partial_tool_names": []}
+
+        result = await executor.execute_retry_with_backoff(plan, adapter, current_state, current_stream, max_attempts=3)
+
+        # Should be blocked by retry eligibility check (no backoff attempts)
+        assert result.success is False
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert "not technically retryable" in result.message
+        assert result.details.get("backoff_attempts") == 0
+
+    @pytest.mark.asyncio
+    async def test_retry_with_backoff_requires_backoff_strategy(self, executor, adapter, budget_manager):
+        """Test that execute_retry_with_backoff raises error without backoff strategy."""
+        # Create executor without backoff
+        safety_gate = SafetyGate(SafetyMode.AUTO_RECOVER)
+        budget_manager = RecoveryBudgetManager()
+        executor_no_backoff = RecoveryExecutor(
+            safety_gate=safety_gate,
+            budget_manager=budget_manager,
+            default_mode=SafetyMode.AUTO_RECOVER,
+        )
+
+        plan = create_mock_plan(
+            action=RecoveryAction.WAIT_AND_RETRY,
+            safety_verdict=SafetyVerdict.SAFE,
+            budget_manager=budget_manager,
+        )
+
+        current_state = create_mock_session()
+        current_stream = {"partial_tool_names": []}
+
+        with pytest.raises(ValueError, match="BackoffStrategy not configured"):
+            await executor_no_backoff.execute_retry_with_backoff(plan, adapter, current_state, current_stream)
 
 
 if __name__ == "__main__":
