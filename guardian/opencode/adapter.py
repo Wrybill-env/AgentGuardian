@@ -1,10 +1,10 @@
-"""
-OpenCode Adapter for Agent Guardian.
+"""OpenCode Adapter for Agent Guardian.
 
 Connects OpenCode (via ACP stdio or HTTP) to Guardian core.
 """
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -100,9 +100,10 @@ class OpenCodeAdapter(AgentAdapter):
         self._capabilities.set_available(AdapterCapability.RECONNECT_STREAM, reason="Implemented via ACP subprocess restart")
         self._capabilities.set_unavailable(AdapterCapability.CANCEL_STREAM, reason="No explicit ACP cancel stream method")
         
-        # Session recovery - VERIFIED IMPLEMENTED via ACP
-        self._capabilities.set_available(AdapterCapability.LOAD_SESSION, reason="Implemented via ACP loadSession method")
-        self._capabilities.set_available(AdapterCapability.FORK_SESSION, reason="Implemented via ACP forkSession method (unstable)")
+        # Session recovery - PARTIALLY_IMPLEMENTED via ACP (UNSTABLE APIs)
+        # OpenCode ACP supports loadSession and forkSession but marks them as UNSTABLE APIs
+        self._capabilities.set_available(AdapterCapability.LOAD_SESSION, reason="Implemented via ACP loadSession method (unstable API)")
+        self._capabilities.set_available(AdapterCapability.FORK_SESSION, reason="Implemented via ACP forkSession method (unstable API)")
         self._capabilities.set_unavailable(AdapterCapability.REATTACH_SESSION, reason="Not directly supported in ACP")
         self._capabilities.set_unavailable(AdapterCapability.SAVE_SESSION, reason="No ACP session save method")
         
@@ -296,9 +297,22 @@ class OpenCodeAdapter(AgentAdapter):
             await self.observer._send_message(load_msg)
             logger.info(f"Sent ACP loadSession for {turn_context.session_id}")
             
-            # Wait for response
-            await asyncio.sleep(1.0)
-            return True
+            # Wait for response and verify success
+            try:
+                response_line = await asyncio.wait_for(
+                    self.observer._process.stdout.readline(),
+                    timeout=10.0
+                )
+                if response_line:
+                    response = json.loads(response_line.strip())
+                    if "error" in response:
+                        logger.error(f"Load session failed: {response['error']}")
+                        return False
+                    logger.info(f"Load session succeeded for {turn_context.session_id}")
+                    return True
+            except asyncio.TimeoutError:
+                logger.error("Load session response timeout")
+                return False
         except Exception as e:
             logger.error(f"Failed to load session via ACP: {e}")
             return False
@@ -330,12 +344,30 @@ class OpenCodeAdapter(AgentAdapter):
             await self.observer._send_message(fork_msg)
             logger.info(f"Sent ACP forkSession for {turn_context.session_id}")
             
-            # Wait for response
-            await asyncio.sleep(1.0)
-            return True
+            # Wait for response and verify success
+            try:
+                response_line = await asyncio.wait_for(
+                    self.observer._process.stdout.readline(),
+                    timeout=10.0
+                )
+                if response_line:
+                    response = json.loads(response_line.strip())
+                    if "error" in response:
+                        logger.error(f"Fork session failed: {response['error']}")
+                        return False
+                    new_session_id = response.get("result", {}).get("sessionId")
+                    if new_session_id:
+                        logger.info(f"Fork session succeeded, new session: {new_session_id}")
+                        context["new_session_id"] = new_session_id
+                        return True
+            except asyncio.TimeoutError:
+                logger.error("Fork session response timeout")
+                return False
         except Exception as e:
             logger.error(f"Failed to fork session via ACP: {e}")
             return False
+        
+        return False
 
     async def _action_wait_for_backend(self, context: dict) -> bool:
         """Wait for backend to restart."""

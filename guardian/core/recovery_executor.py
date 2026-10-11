@@ -68,6 +68,7 @@ class RecoveryExecutionContext:
     observed_assistant_chunks: int = 0
     observed_tools_started: int = 0
     observed_partial_tool_names: list = field(default_factory=list)
+    observed_session_id: str = ""
     turn_phase: str = "IDLE"
     stop_reason: Optional[str] = None
     # TOCTOU protection - state generation
@@ -196,6 +197,7 @@ class RecoveryExecutor:
         observed_partial_tool_names = state_snapshot.get("partial_tool_names", [])
         turn_phase = state_snapshot.get("turn_phase", session_state.phase.value)
         stop_reason = state_snapshot.get("stop_reason", session_state.stop_reason)
+        observed_session_id = state_snapshot.get("session_id", session_state.session_id)
         # Capture state generation at planning time
         state_generation = state_snapshot.get("state_generation", session_state.state_generation)
         
@@ -232,6 +234,7 @@ class RecoveryExecutor:
             observed_partial_tool_names=observed_partial_tool_names,
             turn_phase=turn_phase,
             stop_reason=stop_reason,
+            observed_session_id=observed_session_id,
             # TOCTOU protection
             planned_state_generation=state_generation,
             current_state_generation=session_state.state_generation,
@@ -380,6 +383,14 @@ class RecoveryExecutor:
                 changes["stop_reason"] = {
                     "planned": ctx.stop_reason,
                     "current": current_session_state.stop_reason,
+                }
+        
+            # Check session_id
+            if current_session_state.session_id != ctx.observed_session_id:
+                state_changed = True
+                changes["session_id"] = {
+                    "planned": ctx.observed_session_id,
+                    "current": current_session_state.session_id,
                 }
         
             ctx.state_changed = state_changed
@@ -883,7 +894,7 @@ class RecoveryExecutor:
                 RecoveryAction.CANCEL_AND_REPLAY: AdapterCapability.RETRY_REQUEST,  # Requires cancel + retry
                 RecoveryAction.RECONNECT_STREAM: AdapterCapability.RECONNECT_STREAM,
                 RecoveryAction.REATTACH_SESSION: AdapterCapability.REATTACH_SESSION,
-                RecoveryAction.RELOAD_SESSION: AdapterCapability.REATTACH_SESSION,
+                RecoveryAction.RELOAD_SESSION: AdapterCapability.LOAD_SESSION,
                 RecoveryAction.FORK_SESSION: AdapterCapability.FORK_SESSION,
                 RecoveryAction.SWITCH_PROVIDER: AdapterCapability.SWITCH_PROVIDER,
                 RecoveryAction.WAIT_FOR_BACKEND: AdapterCapability.WAIT_FOR_BACKEND,

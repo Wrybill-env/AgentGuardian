@@ -233,6 +233,7 @@ def create_mock_plan(
         "partial_tool_names": planning_partial_tool_names or [],
         "turn_phase": planning_turn_phase.value,
         "stop_reason": planning_stop_reason,
+        "session_id": session_id,
     }
     
     return plan
@@ -1575,6 +1576,225 @@ class TestBackoffIntegration:
 
         with pytest.raises(ValueError, match="BackoffStrategy not configured"):
             await executor_no_backoff.execute_retry_with_backoff(plan, adapter, current_state, current_stream)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+
+# =============================================================================
+# Tests for New Recovery Actions (FORK_SESSION, LOAD_SESSION, RELOAD_SESSION)
+# =============================================================================
+
+class TestForkSessionRecovery:
+    """Tests for FORK_SESSION recovery action."""
+    
+    @pytest.fixture
+    def executor(self):
+        safety_gate = SafetyGate(SafetyMode.AUTO_RECOVER)
+        budget_manager = RecoveryBudgetManager()
+        return RecoveryExecutor(
+            safety_gate=safety_gate,
+            budget_manager=budget_manager,
+            default_mode=SafetyMode.AUTO_RECOVER,
+        )
+    
+    @pytest.fixture
+    def adapter(self):
+        adapter = MockAdapter()
+        adapter.set_capability(AdapterCapability.FORK_SESSION, True, "Implemented via ACP")
+        adapter.set_verify_result(RecoveryAction.FORK_SESSION, True, {"new_session_id": "forked_session"})
+        return adapter
+    
+    @pytest.fixture
+    def state(self):
+        return create_mock_session(
+            session_id="test_session",
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+    
+    @pytest.mark.asyncio
+    async def test_fork_session_allowed_when_safe(self, executor, adapter, state):
+        """FORK_SESSION should be allowed when no side effects and in USER_MESSAGE_SENT phase."""
+        state.phase = TurnPhase.USER_MESSAGE_SENT
+        
+        plan = create_mock_plan(
+            action=RecoveryAction.FORK_SESSION,
+            safety_verdict=SafetyVerdict.SAFE,
+            safety_reason="Can fork before current turn's user message",
+        )
+        
+        result = await executor.execute_plan(plan, adapter, state, {})
+        
+        assert result.result == ExecutionResult.VERIFICATION_PASSED
+        assert result.success is True
+    
+    @pytest.mark.asyncio
+    async def test_fork_session_blocked_when_assistant_streaming(self, executor, adapter, state):
+        """FORK_SESSION should be AMBIGUOUS when assistant is already streaming."""
+        state.phase = TurnPhase.ASSISTANT_STREAMING
+        state.first_chunk_time = 1000.0  # Some timestamp
+        
+        plan = create_mock_plan(
+            action=RecoveryAction.FORK_SESSION,
+            safety_verdict=SafetyVerdict.AMBIGUOUS,
+            safety_reason="Fork point may include partial side effects",
+        )
+        
+        result = await executor.execute_plan(plan, adapter, state, {})
+        
+        assert result.result == ExecutionResult.REVALIDATION_FAILED
+        assert result.success is False
+        assert "ambiguous" in result.message.lower()
+
+
+class TestLoadSessionRecovery:
+    """Tests for LOAD_SESSION / RELOAD_SESSION recovery action."""
+    
+    @pytest.fixture
+    def executor(self):
+        safety_gate = SafetyGate(SafetyMode.AUTO_RECOVER)
+        budget_manager = RecoveryBudgetManager()
+        return RecoveryExecutor(
+            safety_gate=safety_gate,
+            budget_manager=RecoveryBudgetManager(),
+            default_mode=SafetyMode.AUTO_RECOVER,
+        )
+    
+    @pytest.fixture
+    def adapter(self):
+        adapter = MockAdapter()
+        adapter.set_capability(AdapterCapability.LOAD_SESSION, True, "Implemented via ACP")
+        adapter.set_verify_result(RecoveryAction.RELOAD_SESSION, True, {"verified": "load_session_response_ok"})
+        return adapter
+    
+    @pytest.fixture
+    def state(self):
+        return create_mock_session(
+            session_id="test_session",
+            assistant_chunks=0,
+            tools_started=0,
+            partial_tool_names=[],
+        )
+    
+    @pytest.mark.asyncio
+    async def test_load_session_requires_session_id(self, executor, adapter, state):
+        """LOAD_SESSION should require a valid session ID."""
+        # Create plan FIRST with valid session_id, then clear it
+        plan = create_mock_plan(
+            action=RecoveryAction.RELOAD_SESSION,
+            safety_verdict=SafetyVerdict.SAFE,
+        )
+        state.session_id = ""  # No session ID at execution time
+        
+        result = await executor.execute_plan(plan, adapter, state, {})
+        
+        # Should fail due to revalidation (session_id changed) or safety check
+        assert result.result in (ExecutionResult.CAPABILITY_UNAVAILABLE, ExecutionResult.SAFETY_BLOCKED, ExecutionResult.REVALIDATION_FAILED)
+        assert result.success is False
+    
+    @pytest.mark.asyncio
+    async def test_load_session_allowed_when_safe(self, executor, adapter, state):
+        """RELOAD_SESSION should be allowed when safe and session ID exists."""
+        plan = create_mock_plan(
+            action=RecoveryAction.RELOAD_SESSION,
+            safety_verdict=SafetyVerdict.SAFE,
+        )
+        
+        result = await executor.execute_plan(plan, adapter, state, {})
+        
+        assert result.result == ExecutionResult.VERIFICATION_PASSED
+        assert result.success is True
+
+
+class TestRetryEligibilityForAllRetryActions:
+    """Test that retry eligibility check applies to ALL retry-type actions."""
+    
+    @pytest.fixture
+    def executor(self):
+        safety_gate = SafetyGate(SafetyMode.AUTO_RECOVER)
+        budget_manager = RecoveryBudgetManager()
+        return RecoveryExecutor(
+            safety_gate=SafetyGate(SafetyMode.AUTO_RECOVER),
+            budget_manager=RecoveryBudgetManager(),
+            default_mode=SafetyMode.AUTO_RECOVER,
+        )
+    
+    @pytest.fixture
+    def adapter(self):
+        adapter = MockAdapter()
+        # Set all retry-action capabilities
+        adapter.set_capability(AdapterCapability.RETRY_REQUEST, True, "Implemented")
+        adapter.set_capability(AdapterCapability.RECONNECT_STREAM, True, "Implemented")
+        adapter.set_capability(AdapterCapability.REATTACH_SESSION, True, "Implemented")
+        adapter.set_capability(AdapterCapability.FORK_SESSION, True, "Implemented")
+        adapter.set_capability(AdapterCapability.LOAD_SESSION, True, "Implemented")
+        adapter.set_verify_result(RecoveryAction.WAIT_AND_RETRY, True)
+        adapter.set_verify_result(RecoveryAction.RECONNECT_STREAM, True)
+        adapter.set_verify_result(RecoveryAction.RELOAD_SESSION, True)
+        adapter.set_verify_result(RecoveryAction.FORK_SESSION, True)
+        return adapter
+    
+    @pytest.fixture
+    def state(self):
+        return create_mock_session(assistant_chunks=0, tools_started=0)
+    
+    @pytest.mark.asyncio
+    async def test_reconnect_stream_blocked_for_auth_failure(self, executor, adapter, state):
+        """RECONNECT_STREAM blocked for non-retryable auth failure."""
+        adapter.set_capability(AdapterCapability.RECONNECT_STREAM, True, "Implemented")
+        adapter.set_verify_result(RecoveryAction.RECONNECT_STREAM, True)
+        
+        plan = create_mock_plan(
+            action=RecoveryAction.RECONNECT_STREAM,
+            safety_verdict=SafetyVerdict.SAFE,
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,
+            replay_safe=False,
+        )
+        
+        result = await executor.execute_plan(plan, adapter, state, {})
+        # Should be blocked by retry eligibility check
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert result.success is False
+        assert "not technically retryable" in result.message
+    
+    @pytest.mark.asyncio
+    async def test_fork_session_blocked_for_auth_failure(self, executor, adapter, state):
+        """FORK_SESSION blocked for non-retryable auth failure."""
+        adapter.set_capability(AdapterCapability.FORK_SESSION, True, "Implemented")
+        adapter.set_verify_result(RecoveryAction.FORK_SESSION, True)
+        
+        plan = create_mock_plan(
+            action=RecoveryAction.FORK_SESSION,
+            safety_verdict=SafetyVerdict.SAFE,
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,
+            replay_safe=False,
+        )
+        
+        result = await executor.execute_plan(plan, adapter, state, {})
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert "not technically retryable" in result.message
+    
+    @pytest.mark.asyncio
+    async def test_load_session_blocked_for_auth_failure(self, executor, adapter, state):
+        """RELOAD_SESSION blocked for non-retryable auth failure."""
+        adapter.set_capability(AdapterCapability.LOAD_SESSION, True, "Implemented")
+        adapter.set_verify_result(RecoveryAction.RELOAD_SESSION, True)
+        
+        plan = create_mock_plan(
+            action=RecoveryAction.RELOAD_SESSION,
+            safety_verdict=SafetyVerdict.SAFE,
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,
+            replay_safe=False,
+        )
+        
+        result = await executor.execute_plan(plan, adapter, state, {})
+        assert result.result == ExecutionResult.SAFETY_BLOCKED
+        assert "not technically retryable" in result.message
 
 
 if __name__ == "__main__":
