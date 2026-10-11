@@ -306,176 +306,185 @@ class RecoveryExecutor:
         )
     
     def _revalidate_safety(
-            self,
-            ctx: RecoveryExecutionContext,
-            current_session_state: TurnContext,
-            current_stream_state: Optional[Dict[str, Any]] = None,
-        ) -> RecoveryExecutionResult:
-            """
-            CRITICAL: Revalidate safety with CURRENT state before execution.
+                self,
+                ctx: RecoveryExecutionContext,
+                current_session_state: TurnContext,
+                current_stream_state: Optional[Dict[str, Any]] = None,
+            ) -> RecoveryExecutionResult:
+                """
+                CRITICAL: Revalidate safety with CURRENT state before execution.
 
-            This is the key safety mechanism - the world can change between
-            planning and execution. If any critical state has changed,
-            execution is aborted.
-            """
-        
-            # TOCTOU protection: Check state generation FIRST
-            if ctx.planned_state_generation != ctx.current_state_generation:
-                return RecoveryExecutionResult(
-                    result=ExecutionResult.REVALIDATION_FAILED,
-                    action=ctx.action,
-                    success=False,
-                    message=f"State generation changed during planning - possible concurrent modification",
-                    details={
-                        "state_changed": True,
-                        "changes": {
-                            "state_generation": {
-                                "planned": ctx.planned_state_generation,
-                                "current": ctx.current_state_generation,
-                            }
-                        },
-                        "revalidation_verdict": SafetyVerdict.UNSAFE.value,
-                        "revalidation_reason": "State generation mismatch - concurrent state modification detected",
-                        "blocking_factors": ["State generation changed"],
-                    },
-                )
-        
-            # Compare planned state with current state
-            state_changed = False
-            changes = {}
-        
-            # Check assistant output
-            if current_session_state.assistant_chunks_received != ctx.observed_assistant_chunks:
-                state_changed = True
-                changes["assistant_chunks"] = {
-                    "planned": ctx.observed_assistant_chunks,
-                    "current": current_session_state.assistant_chunks_received,
-                }
-        
-            # Check tool activity
-            if current_session_state.tool_calls_started != ctx.observed_tools_started:
-                state_changed = True
-                changes["tools_started"] = {
-                    "planned": ctx.observed_tools_started,
-                    "current": current_session_state.tool_calls_started,
-                }
-        
-            # Check partial tool names
-            current_partial = list(current_stream_state.get("partial_tool_names", [])) if current_stream_state else []
-            if set(current_partial) != set(ctx.observed_partial_tool_names):
-                state_changed = True
-                changes["partial_tool_names"] = {
-                    "planned": ctx.observed_partial_tool_names,
-                    "current": current_partial,
-                }
-        
-            # Check turn phase
-            if current_session_state.phase.value != ctx.turn_phase:
-                state_changed = True
-                changes["turn_phase"] = {
-                    "planned": ctx.turn_phase,
-                    "current": current_session_state.phase.value,
-                }
-        
-            # Check stop reason
-            if current_session_state.stop_reason != ctx.stop_reason:
-                state_changed = True
-                changes["stop_reason"] = {
-                    "planned": ctx.stop_reason,
-                    "current": current_session_state.stop_reason,
-                }
-        
-            # Check session_id
-            if current_session_state.session_id != ctx.observed_session_id:
-                state_changed = True
-                changes["session_id"] = {
-                    "planned": ctx.observed_session_id,
-                    "current": current_session_state.session_id,
-                }
-        
-            ctx.state_changed = state_changed
-            ctx.state_change_details = changes
-            ctx.revalidation_timestamp = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0
-        
-            # If state changed, re-evaluate safety
-            if state_changed:
-                # Re-evaluate safety with current state
-                safety_result = self.safety_gate.check_recovery_action_safety(
-                    action=ctx.action,
-                    turn_context=current_session_state,
-                    failure_classification=None,  # We'll use the plan's classification
-                    session_state=current_stream_state,
-                )
-            
-                # Additionally, if the turn phase has advanced beyond assistant streaming,
-                # that's a strong signal that side effects may have occurred
-                if "turn_phase" in changes:
-                    planned_phase = changes["turn_phase"]["planned"]
-                    current_phase = changes["turn_phase"]["current"]
-                    # If phase advanced from streaming to tool execution or beyond, block
-                    phase_order = {
-                        "idle": 0,
-                        "user_message_sent": 1,
-                        "assistant_streaming": 2,
-                        "tool_executing": 3,
-                        "tool_completing": 4,
-                        "turn_ending": 5,
-                        "turn_complete": 6,
-                        "turn_error": 7,
-                        "turn_cancelled": 8,
-                    }
-                    planned_order = phase_order.get(planned_phase, 0)
-                    current_order = phase_order.get(current_phase, 0)
-                    if current_order > planned_order:
-                        safety_result = SafetyCheckResult(
-                            verdict=SafetyVerdict.UNSAFE,
-                            reason=f"Turn phase advanced from {planned_phase} to {current_phase} - side effects likely",
-                            blocking_factors=[f"Phase advanced: {planned_phase} -> {current_phase}"],
-                        )
-            
-                # Also check stop_reason - if it appeared when it was None before
-                if "stop_reason" in changes:
-                    planned_reason = changes["stop_reason"]["planned"]
-                    current_reason = changes["stop_reason"]["current"]
-                    if planned_reason is None and current_reason is not None:
-                        safety_result = SafetyCheckResult(
-                            verdict=SafetyVerdict.UNSAFE,
-                            reason=f"Stop reason appeared: {current_reason} - turn may have completed",
-                            blocking_factors=[f"Stop reason appeared: {current_reason}"],
-                        )
-            
-                if safety_result.verdict != SafetyVerdict.SAFE:
+                This is the key safety mechanism - the world can change between
+                planning and execution. If any critical state has changed,
+                execution is aborted.
+                """
+
+                # TOCTOU protection: Check state generation FIRST
+                if ctx.planned_state_generation != ctx.current_state_generation:
                     return RecoveryExecutionResult(
                         result=ExecutionResult.REVALIDATION_FAILED,
                         action=ctx.action,
                         success=False,
-                        message=f"State changed during planning - revalidation blocked execution",
+                        message=f"State generation changed during planning - possible concurrent modification",
                         details={
                             "state_changed": True,
-                            "changes": changes,
-                            "revalidation_verdict": safety_result.verdict.value,
-                            "revalidation_reason": safety_result.reason,
-                            "blocking_factors": safety_result.blocking_factors,
+                            "changes": {
+                                "state_generation": {
+                                    "planned": ctx.planned_state_generation,
+                                    "current": ctx.current_state_generation,
+                                }
+                            },
+                            "revalidation_verdict": SafetyVerdict.UNSAFE.value,
+                            "revalidation_reason": "State generation mismatch - concurrent state modification detected",
+                            "blocking_factors": ["State generation changed"],
                         },
                     )
-        
-            # Even if no state change, verify safety verdict is still SAFE
-            if ctx.safety_verdict != SafetyVerdict.SAFE:
+
+                # Compare planned state with current state
+                state_changed = False
+                changes = {}
+
+                # Check assistant output
+                if current_session_state.assistant_chunks_received != ctx.observed_assistant_chunks:
+                    state_changed = True
+                    changes["assistant_chunks"] = {
+                        "planned": ctx.observed_assistant_chunks,
+                        "current": current_session_state.assistant_chunks_received,
+                    }
+
+                # Check tool activity
+                if current_session_state.tool_calls_started != ctx.observed_tools_started:
+                    state_changed = True
+                    changes["tools_started"] = {
+                        "planned": ctx.observed_tools_started,
+                        "current": current_session_state.tool_calls_started,
+                    }
+
+                # Check partial tool names
+                current_partial = list(current_stream_state.get("partial_tool_names", [])) if current_stream_state else []
+                if set(current_partial) != set(ctx.observed_partial_tool_names):
+                    state_changed = True
+                    changes["partial_tool_names"] = {
+                        "planned": ctx.observed_partial_tool_names,
+                        "current": current_partial,
+                    }
+
+                # Check turn phase
+                if current_session_state.phase.value != ctx.turn_phase:
+                    state_changed = True
+                    changes["turn_phase"] = {
+                        "planned": ctx.turn_phase,
+                        "current": current_session_state.phase.value,
+                    }
+
+                # Check stop reason
+                if current_session_state.stop_reason != ctx.stop_reason:
+                    state_changed = True
+                    changes["stop_reason"] = {
+                        "planned": ctx.stop_reason,
+                        "current": current_session_state.stop_reason,
+                    }
+
+                # Check session_id
+                if current_session_state.session_id != ctx.observed_session_id:
+                    state_changed = True
+                    changes["session_id"] = {
+                        "planned": ctx.observed_session_id,
+                        "current": current_session_state.session_id,
+                    }
+
+                ctx.state_changed = state_changed
+                ctx.state_change_details = changes
+                ctx.revalidation_timestamp = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0
+
+                # If state changed, re-evaluate safety
+                if state_changed:
+                    # Re-evaluate safety with current state
+                    safety_result = self.safety_gate.check_recovery_action_safety(
+                        action=ctx.action,
+                        turn_context=current_session_state,
+                        failure_classification=None,  # We'll use the plan's classification
+                        session_state=current_stream_state,
+                    )
+
+                    # Session ID change is inherently unsafe - we cannot verify
+                    # we're operating on the same session that was planned for
+                    if "session_id" in changes:
+                        safety_result = SafetyCheckResult(
+                            verdict=SafetyVerdict.UNSAFE,
+                            reason="Session ID changed between planning and execution - cannot verify session identity",
+                            blocking_factors=["Session ID mismatch: planned session differs from current"],
+                        )
+
+                    # Additionally, if the turn phase has advanced beyond assistant streaming,
+                    # that's a strong signal that side effects may have occurred
+                    if "turn_phase" in changes:
+                        planned_phase = changes["turn_phase"]["planned"]
+                        current_phase = changes["turn_phase"]["current"]
+                        # If phase advanced from streaming to tool execution or beyond, block
+                        phase_order = {
+                            "idle": 0,
+                            "user_message_sent": 1,
+                            "assistant_streaming": 2,
+                            "tool_executing": 3,
+                            "tool_completing": 4,
+                            "turn_ending": 5,
+                            "turn_complete": 6,
+                            "turn_error": 7,
+                            "turn_cancelled": 8,
+                        }
+                        planned_order = phase_order.get(planned_phase, 0)
+                        current_order = phase_order.get(current_phase, 0)
+                        if current_order > planned_order:
+                            safety_result = SafetyCheckResult(
+                                verdict=SafetyVerdict.UNSAFE,
+                                reason=f"Turn phase advanced from {planned_phase} to {current_phase} - side effects likely",
+                                blocking_factors=[f"Phase advanced: {planned_phase} -> {current_phase}"],
+                            )
+
+                    # Also check stop_reason - if it appeared when it was None before
+                    if "stop_reason" in changes:
+                        planned_reason = changes["stop_reason"]["planned"]
+                        current_reason = changes["stop_reason"]["current"]
+                        if planned_reason is None and current_reason is not None:
+                            safety_result = SafetyCheckResult(
+                                verdict=SafetyVerdict.UNSAFE,
+                                reason=f"Stop reason appeared: {current_reason} - turn may have completed",
+                                blocking_factors=[f"Stop reason appeared: {current_reason}"],
+                            )
+
+                    if safety_result.verdict != SafetyVerdict.SAFE:
+                        return RecoveryExecutionResult(
+                            result=ExecutionResult.REVALIDATION_FAILED,
+                            action=ctx.action,
+                            success=False,
+                            message=f"State changed during planning - revalidation blocked execution",
+                            details={
+                                "state_changed": True,
+                                "changes": changes,
+                                "revalidation_verdict": safety_result.verdict.value,
+                                "revalidation_reason": safety_result.reason,
+                                "blocking_factors": safety_result.blocking_factors,
+                            },
+                        )
+
+                # Even if no state change, verify safety verdict is still SAFE
+                if ctx.safety_verdict != SafetyVerdict.SAFE:
+                    return RecoveryExecutionResult(
+                        result=ExecutionResult.REVALIDATION_FAILED,
+                        action=ctx.action,
+                        success=False,
+                        message=f"Plan safety verdict was not SAFE: {ctx.safety_verdict.value}",
+                        details={"original_verdict": ctx.safety_verdict.value},
+                    )
+
                 return RecoveryExecutionResult(
-                    result=ExecutionResult.REVALIDATION_FAILED,
+                    result=ExecutionResult.EXECUTED,
                     action=ctx.action,
-                    success=False,
-                    message=f"Plan safety verdict was not SAFE: {ctx.safety_verdict.value}",
-                    details={"original_verdict": ctx.safety_verdict.value},
+                    success=True,
+                    message="Safety revalidation passed",
+                    details={"state_changed": state_changed, "changes": changes} if state_changed else {},
                 )
-        
-            return RecoveryExecutionResult(
-                result=ExecutionResult.EXECUTED,
-                action=ctx.action,
-                success=True,
-                message="Safety revalidation passed",
-                details={"state_changed": state_changed, "changes": changes} if state_changed else {},
-            )
     
     def _check_capability(
         self,
