@@ -79,7 +79,7 @@ class GuardianCLI:
         # Main parser
         parser = argparse.ArgumentParser(
             prog="python -m guardian",
-            description="Agent Guardian - Goose Desktop Watchdog",
+            description="Agent Guardian - AI Coding Agent Reliability Layer",
             parents=[global_parser],
         )
         
@@ -168,6 +168,87 @@ class GuardianCLI:
             help="Seconds between chunks before reporting gap (default: 15)"
         )
         observe_hermes.add_argument(
+            "--tool-timeout-threshold",
+            type=float,
+            default=120.0,
+            help="Seconds before reporting tool timeout (default: 120)"
+        )
+        
+        # observe opencode
+        observe_opencode = observe_subparsers.add_parser(
+            "opencode",
+            help="Observe OpenCode ACP events (read-only, stdio subprocess)",
+            parents=[global_parser],
+        )
+        observe_opencode.add_argument(
+            "--opencode-path",
+            default="opencode",
+            help="Path to opencode executable (default: opencode)"
+        )
+        observe_opencode.add_argument(
+            "--stale-threshold",
+            type=float,
+            default=60.0,
+            help="Seconds before reporting stale stream (default: 60)"
+        )
+        observe_opencode.add_argument(
+            "--first-chunk-threshold",
+            type=float,
+            default=30.0,
+            help="Seconds before reporting first chunk timeout (default: 30)"
+        )
+        observe_opencode.add_argument(
+            "--chunk-gap-threshold",
+            type=float,
+            default=15.0,
+            help="Seconds between chunks before reporting gap (default: 15)"
+        )
+        observe_opencode.add_argument(
+            "--tool-timeout-threshold",
+            type=float,
+            default=120.0,
+            help="Seconds before reporting tool timeout (default: 120)"
+        )
+
+        # observe freebuff
+        observe_freebuff = observe_subparsers.add_parser(
+            "freebuff",
+            help="Observe FreeBuff events via WebSocket (read-only)",
+            parents=[global_parser],
+        )
+        observe_freebuff.add_argument(
+            "--base-url",
+            default="https://codebuff.com",
+            help="FreeBuff API base URL (default: https://codebuff.com)"
+        )
+        observe_freebuff.add_argument(
+            "--api-token",
+            help="FreeBuff API token (required)"
+        )
+        observe_freebuff.add_argument(
+            "--websocket-url",
+            default="wss://codebuff.com/ws",
+            help="FreeBuff WebSocket URL (default: wss://codebuff.com/ws)"
+        )
+        observe_freebuff.add_argument(
+            "--stale-threshold",
+            type=float,
+            default=60.0,
+            help="Seconds before reporting stale stream (default: 60)"
+        )
+        observe_freebuff.add_argument(
+            "--first-chunk-threshold",
+            type=float,
+            default=30.0,
+            help="Seconds before reporting first chunk timeout (default: 30)"
+        )
+        observe_freebuff.add_argument(
+            "--chunk-gap-threshold",
+            type=float,
+            default=15.0,
+            help="Seconds between chunks before reporting gap (default: 15)"
+        )
+        observe_freebuff.add_argument(
             "--tool-timeout-threshold",
             type=float,
             default=120.0,
@@ -289,6 +370,10 @@ class GuardianCLI:
             return await self._run_observe_goose(args)
         elif args.observe_target == "hermes":
             return await self._run_observe_hermes(args)
+        elif args.observe_target == "opencode":
+            return await self._run_observe_opencode(args)
+        elif args.observe_target == "freebuff":
+            return await self._run_observe_freebuff(args)
         else:
             logger.error(f"Unknown observe target: {args.observe_target}")
             return 1
@@ -345,7 +430,96 @@ class GuardianCLI:
             print("\n[Guardian] Shutting down...")
         
         return 0
-    
+
+    async def _run_observe_opencode(self, args: argparse.Namespace) -> int:
+        """Run the observe command for OpenCode (read-only, stdio subprocess)."""
+        from guardian.opencode import OpenCodeObserver, OpenCodeConnectionInfo
+        from guardian.core import SafetyMode
+        
+        connection_info = OpenCodeConnectionInfo(mode="acp")
+        
+        print(f"\n[Guardian] OpenCode ACP stdio observer")
+        print(f"[Guardian] Opencode path: {args.opencode_path}")
+        print(f"[Guardian] Stale threshold: {args.stale_threshold}s")
+        print(f"[Guardian] First chunk threshold: {args.first_chunk_threshold}s")
+        print(f"[Guardian] Chunk gap threshold: {args.chunk_gap_threshold}s")
+        print(f"[Guardian] Tool timeout threshold: {args.tool_timeout_threshold}s")
+        print(f"[Guardian] NOTE: This requires opencode to be installed and in PATH.\n")
+        
+        try:
+            self.observer = await OpenCodeObserver(
+                connection_info=connection_info,
+                stale_threshold=args.stale_threshold,
+                first_chunk_threshold=args.first_chunk_threshold,
+                chunk_gap_threshold=args.chunk_gap_threshold,
+                tool_timeout_threshold=args.tool_timeout_threshold,
+                on_event=self._handle_event,
+                on_failure=self._handle_failure,
+            )
+            
+            print(f"[Guardian] Observer running. Press Ctrl+C to stop.\n")
+            await self._wait_for_shutdown()
+            
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+            return 1
+        except KeyboardInterrupt:
+            print("\n[Guardian] Shutting down...")
+        finally:
+            if self.observer:
+                await self.observer.disconnect()
+        
+        return 0
+
+    async def _run_observe_freebuff(self, args: argparse.Namespace) -> int:
+        """Run the observe command for FreeBuff (read-only, WebSocket)."""
+        from guardian.freebuff import FreeBuffObserver, FreeBuffConnectionInfo
+        from guardian.core import SafetyMode
+        
+        if not args.api_token:
+            logger.error("FreeBuff API token is required (--api-token)")
+            return 1
+        
+        connection_info = FreeBuffConnectionInfo(
+            base_url=args.base_url,
+            api_token=args.api_token,
+            websocket_url=args.websocket_url,
+            cost_mode="free"
+        )
+        
+        print(f"\n[Guardian] FreeBuff WebSocket observer")
+        print(f"[Guardian] Base URL: {args.base_url}")
+        print(f"[Guardian] WebSocket URL: {args.websocket_url}")
+        print(f"[Guardian] Stale threshold: {args.stale_threshold}s")
+        print(f"[Guardian] First chunk threshold: {args.first_chunk_threshold}s")
+        print(f"[Guardian] Chunk gap threshold: {args.chunk_gap_threshold}s")
+        print(f"[Guardian] Tool timeout threshold: {args.tool_timeout_threshold}s\n")
+        
+        try:
+            self.observer = await FreeBuffObserver(
+                connection_info=connection_info,
+                stale_threshold=args.stale_threshold,
+                first_chunk_threshold=args.first_chunk_threshold,
+                chunk_gap_threshold=args.chunk_gap_threshold,
+                tool_timeout_threshold=args.tool_timeout_threshold,
+                on_event=self._handle_event,
+                on_failure=self._handle_failure,
+            )
+            
+            print(f"[Guardian] Observer running. Press Ctrl+C to stop.\n")
+            await self._wait_for_shutdown()
+            
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+            return 1
+        except KeyboardInterrupt:
+            print("\n[Guardian] Shutting down...")
+        finally:
+            if self.observer:
+                await self.observer.disconnect()
+        
+        return 0
+
     async def run_watch(self, args: argparse.Namespace) -> int:
             """Run the watch command with full state machine."""
             connection_info = await self._get_connection_info(args)
