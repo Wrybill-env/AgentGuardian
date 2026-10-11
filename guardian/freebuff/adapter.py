@@ -93,45 +93,48 @@ class FreeBuffAdapter(AgentAdapter):
         self._declare_capabilities()
 
     def _declare_capabilities(self):
-        """Declare capabilities based on actual FreeBuff API support."""
-        # Observation - VERIFIED IMPLEMENTED via HTTP/WebSocket
-        self._capabilities.set_available(AdapterCapability.OBSERVE_STREAM, reason="Implemented via WebSocket message.chunk events")
-        self._capabilities.set_unavailable(AdapterCapability.OBSERVE_REASONING, reason="FreeBuff doesn't expose reasoning separately")
-        self._capabilities.set_available(AdapterCapability.OBSERVE_TOOL_PROGRESS, reason="Implemented via tool.call events")
-        self._capabilities.set_available(AdapterCapability.OBSERVE_TURN_LIFECYCLE, reason="Implemented via session/run lifecycle events")
+        """Declare capabilities based on actual FreeBuff (Codebuff) API support."""
+        # Observation - PARTIALLY_IMPLEMENTED via HTTP/WebSocket
+        # Based on actual Codebuff SDK: events are streamed via handleEvent callback
+        self._capabilities.set_available(AdapterCapability.OBSERVE_STREAM, reason="Implemented via Codebuff SDK handleEvent callback")
+        self._capabilities.set_unavailable(AdapterCapability.OBSERVE_REASONING, reason="FreeBuff/Codebuff doesn't expose reasoning separately")
+        self._capabilities.set_available(AdapterCapability.OBSERVE_TOOL_PROGRESS, reason="Implemented via Codebuff tool call events")
+        self._capabilities.set_available(AdapterCapability.OBSERVE_TURN_LIFECYCLE, reason="Implemented via run start/end events")
         
-        # Stream recovery - VERIFIED IMPLEMENTED via WebSocket reconnect
+        # Stream recovery - LIMITED (WebSocket reconnect only)
         self._capabilities.set_available(AdapterCapability.RECONNECT_STREAM, reason="Implemented via WebSocket reconnection")
-        self._capabilities.set_unavailable(AdapterCapability.CANCEL_STREAM, reason="No explicit stream cancel in FreeBuff API")
+        self._capabilities.set_unavailable(AdapterCapability.CANCEL_STREAM, reason="No explicit stream cancel in FreeBuff/Codebuff API")
         
-        # Session recovery - PARTIALLY_IMPLEMENTED
-        self._capabilities.set_unavailable(AdapterCapability.REATTACH_SESSION, reason="No session reattach in FreeBuff API")
-        self._capabilities.set_unavailable(AdapterCapability.FORK_SESSION, reason="No session fork in FreeBuff API")
-        self._capabilities.set_unavailable(AdapterCapability.LOAD_SESSION, reason="No session load in FreeBuff API")
-        self._capabilities.set_unavailable(AdapterCapability.SAVE_SESSION, reason="No session save in FreeBuff API")
+        # Session recovery - NOT SUPPORTED by FreeBuff/Codebuff API
+        # The Codebuff SDK uses previousRun for continuity, not session load/fork
+        self._capabilities.set_unavailable(AdapterCapability.REATTACH_SESSION, reason="No session reattach in FreeBuff/Codebuff API")
+        self._capabilities.set_unavailable(AdapterCapability.FORK_SESSION, reason="No session fork in FreeBuff/Codebuff API")
+        self._capabilities.set_unavailable(AdapterCapability.LOAD_SESSION, reason="No session load in FreeBuff/Codebuff API - use previousRun instead")
+        self._capabilities.set_unavailable(AdapterCapability.SAVE_SESSION, reason="No session save in FreeBuff/Codebuff API")
         
-        # Provider recovery - NOT IN FREEBUFF API
-        self._capabilities.set_unavailable(AdapterCapability.SWITCH_PROVIDER, reason="Not in FreeBuff API")
-        self._capabilities.set_unavailable(AdapterCapability.GET_PROVIDER_LIST, reason="Not in FreeBuff API")
+        # Provider recovery - NOT IN FREEBUFF/CODEBUFF API
+        self._capabilities.set_unavailable(AdapterCapability.SWITCH_PROVIDER, reason="Not in FreeBuff/Codebuff API")
+        self._capabilities.set_unavailable(AdapterCapability.GET_PROVIDER_LIST, reason="Not in FreeBuff/Codebuff API")
         
-        # Agent process - PARTIAL
-        self._capabilities.set_unavailable(AdapterCapability.RESTART_AGENT, reason="FreeBuff is SaaS, can't restart")
+        # Agent process - SaaS, cannot restart
+        self._capabilities.set_unavailable(AdapterCapability.RESTART_AGENT, reason="FreeBuff/Codebuff is SaaS, can't restart")
         self._capabilities.set_unavailable(AdapterCapability.GET_AGENT_STATUS, reason="No agent status endpoint")
         self._capabilities.set_available(AdapterCapability.IS_AGENT_ALIVE, reason="Implemented via WebSocket connection status")
         
-        # Turn control
-        self._capabilities.set_unavailable(AdapterCapability.CANCEL_TURN, reason="No turn cancel in FreeBuff API")
-        self._capabilities.set_unavailable(AdapterCapability.RETRY_REQUEST, reason="No explicit retry, but can start new run")
-        self._capabilities.set_unavailable(AdapterCapability.REPLAY_TURN, reason="No replay in FreeBuff API")
+        # Turn control - LIMITED
+        # Codebuff doesn't have explicit cancel, retry, or replay
+        self._capabilities.set_unavailable(AdapterCapability.CANCEL_TURN, reason="No turn cancel in FreeBuff/Codebuff API")
+        self._capabilities.set_available(AdapterCapability.RETRY_REQUEST, reason="Implemented by starting new run with previousRun")
+        self._capabilities.set_unavailable(AdapterCapability.REPLAY_TURN, reason="No replay in FreeBuff/Codebuff API")
         
         # Introspection - PARTIAL
         self._capabilities.set_unavailable(AdapterCapability.GET_PARTIAL_TOOL_NAMES, reason="Not exposed via API")
-        self._capabilities.set_unavailable(AdapterCapability.GET_TOOL_STATE, reason="Not in FreeBuff API")
-        self._capabilities.set_available(AdapterCapability.GET_SESSION_STATE, reason="Implemented via observer session tracking")
+        self._capabilities.set_unavailable(AdapterCapability.GET_TOOL_STATE, reason="Not in FreeBuff/Codebuff API")
+        self._capabilities.set_available(AdapterCapability.GET_SESSION_STATE, reason="Implemented via observer run tracking")
         self._capabilities.set_available(AdapterCapability.GET_TURN_CONTEXT, reason="Implemented via observer turn tracking")
         
         # Safety - PARTIAL
-        self._capabilities.set_available(AdapterCapability.VERIFY_SESSION_IDENTITY, reason="Implemented via session ID tracking")
+        self._capabilities.set_available(AdapterCapability.VERIFY_SESSION_IDENTITY, reason="Implemented via session/run ID tracking")
         self._capabilities.set_unavailable(AdapterCapability.VERIFY_SESSION_EXISTS, reason="No session list query")
         
         # Monitoring - VERIFIED IMPLEMENTED

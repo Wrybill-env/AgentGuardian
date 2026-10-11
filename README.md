@@ -140,7 +140,7 @@ python -m guardian config {show,set,save} [OPTIONS]
 
 ## Supported Agents & Capabilities
 
-| Capability | Hermes | Goose | OpenCode | FreeBuff |
+| Capability | Hermes | Goose | OpenCode | FreeBuff (Codebuff) |
 |------------|--------|-------|----------|----------|
 | **Observation** | | | | |
 | Stream chunks | ✅ | ✅ | ✅ | ✅ |
@@ -152,8 +152,8 @@ python -m guardian config {show,set,save} [OPTIONS]
 | Cancel stream | ❌ | ❌ | ❌ | ❌ |
 | **Session Recovery** | | | | |
 | Reattach session | ❌ | ❌ | ❌ | ❌ |
-| Fork session | ❌ | ✅ (ACP) | ❌ | ❌ |
-| Load session | ❌ | ✅ (ACP) | ❌ | ❌ |
+| Fork session | ❌ | ✅ (ACP) | ✅ (ACP unstable) | ❌ |
+| Load session | ❌ | ✅ (ACP) | ✅ (ACP) | ❌ (use previousRun) |
 | **Provider Recovery** | | | | |
 | Switch provider | ❌ | ❌ | ❌ | ❌ |
 | Get provider list | ❌ | ❌ | ❌ | ❌ |
@@ -162,17 +162,17 @@ python -m guardian config {show,set,save} [OPTIONS]
 | Get agent status | ❌ | ✅ (HTTP) | ✅ (process) | ❌ |
 | Is agent alive | ❌ | ✅ (WS) | ✅ (process) | ✅ (WS) |
 | **Turn Control** | | | | |
-| Cancel turn | ❌ | ✅ (ACP) | ❌ | ❌ |
-| Retry request | ✅ (simulated) | ✅ (reattach) | ✅ (new session) | ❌ |
-| Replay turn | ❌ | ✅ (load) | ❌ | ❌ |
+| Cancel turn | ❌ | ✅ (ACP) | ✅ (ACP cancel) | ❌ |
+| Retry request | ✅ (simulated) | ✅ (reattach) | ✅ (new session) | ✅ (previousRun) |
+| Replay turn | ❌ | ✅ (load) | ✅ (load) | ❌ |
 | **Introspection** | | | | |
-| Partial tool names | ✅ | ❌ | ❌ | ❌ |
+| Partial tool names | ✅ | ❌ | ✅ (observer) | ❌ |
 | Tool state | ❌ | ✅ (ACP) | ❌ | ❌ |
-| Session state | ✅ | ✅ | ✅ | ✅ |
+| Session state | ✅ | ✅ | ✅ | ✅ (run state) |
 | Turn context | ✅ | ✅ | ✅ | ✅ |
 | **Safety** | | | | |
 | Verify session identity | ✅ | ✅ | ✅ | ✅ |
-| Verify session exists | ❌ | ❌ | ❌ | ❌ |
+| Verify session exists | ❌ | ❌ | ✅ (listSessions) | ❌ |
 | **Monitoring** | | | | |
 | Detect disconnect | ✅ | ✅ | ✅ | ✅ |
 | Detect crash | ❌ | ❌ | ✅ (process) | ✅ (connection) |

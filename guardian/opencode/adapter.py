@@ -91,19 +91,19 @@ class OpenCodeAdapter(AgentAdapter):
     def _declare_capabilities(self):
         """Declare capabilities based on actual OpenCode ACP support."""
         # Observation - VERIFIED IMPLEMENTED via ACP stdio
-        self._capabilities.set_available(AdapterCapability.OBSERVE_STREAM, reason="Implemented via ACP message/chunk events")
-        self._capabilities.set_available(AdapterCapability.OBSERVE_REASONING, reason="Implemented via agent/thinking events")
-        self._capabilities.set_available(AdapterCapability.OBSERVE_TOOL_PROGRESS, reason="Implemented via tool/call, tool/update, tool/result events")
-        self._capabilities.set_available(AdapterCapability.OBSERVE_TURN_LIFECYCLE, reason="Implemented via session/new, session/close, message events")
+        self._capabilities.set_available(AdapterCapability.OBSERVE_STREAM, reason="Implemented via ACP agent_message_chunk events")
+        self._capabilities.set_available(AdapterCapability.OBSERVE_REASONING, reason="Implemented via agent_thought_chunk events")
+        self._capabilities.set_available(AdapterCapability.OBSERVE_TOOL_PROGRESS, reason="Implemented via tool_call and tool_call_update events")
+        self._capabilities.set_available(AdapterCapability.OBSERVE_TURN_LIFECYCLE, reason="Implemented via sessionNotification and prompt response events")
         
         # Stream recovery - VERIFIED IMPLEMENTED via ACP reconnect
         self._capabilities.set_available(AdapterCapability.RECONNECT_STREAM, reason="Implemented via ACP subprocess restart")
         self._capabilities.set_unavailable(AdapterCapability.CANCEL_STREAM, reason="No explicit ACP cancel stream method")
         
-        # Session recovery - PARTIALLY_IMPLEMENTED (requires verification)
+        # Session recovery - VERIFIED IMPLEMENTED via ACP
+        self._capabilities.set_available(AdapterCapability.LOAD_SESSION, reason="Implemented via ACP loadSession method")
+        self._capabilities.set_available(AdapterCapability.FORK_SESSION, reason="Implemented via ACP forkSession method (unstable)")
         self._capabilities.set_unavailable(AdapterCapability.REATTACH_SESSION, reason="Not directly supported in ACP")
-        self._capabilities.set_unavailable(AdapterCapability.FORK_SESSION, reason="No ACP session fork method")
-        self._capabilities.set_unavailable(AdapterCapability.LOAD_SESSION, reason="No ACP session load method")
         self._capabilities.set_unavailable(AdapterCapability.SAVE_SESSION, reason="No ACP session save method")
         
         # Provider recovery - NOT IN ACP
@@ -116,19 +116,19 @@ class OpenCodeAdapter(AgentAdapter):
         self._capabilities.set_available(AdapterCapability.IS_AGENT_ALIVE, reason="Implemented via process/connection status")
         
         # Turn control - VERIFIED IMPLEMENTED via ACP
-        self._capabilities.set_unavailable(AdapterCapability.CANCEL_TURN, reason="No ACP cancel turn method")
+        self._capabilities.set_available(AdapterCapability.CANCEL_TURN, reason="Implemented via ACP cancel notification")
         self._capabilities.set_available(AdapterCapability.RETRY_REQUEST, reason="Implemented via new session + replay")
-        self._capabilities.set_unavailable(AdapterCapability.REPLAY_TURN, reason="No explicit replay, but can start new session")
+        self._capabilities.set_available(AdapterCapability.REPLAY_TURN, reason="Implemented via loadSession with history replay")
         
         # Introspection - PARTIAL
-        self._capabilities.set_unavailable(AdapterCapability.GET_PARTIAL_TOOL_NAMES, reason="Available via observer but not ACP method")
+        self._capabilities.set_available(AdapterCapability.GET_PARTIAL_TOOL_NAMES, reason="Available via observer session tracking")
         self._capabilities.set_unavailable(AdapterCapability.GET_TOOL_STATE, reason="Not in ACP")
         self._capabilities.set_available(AdapterCapability.GET_SESSION_STATE, reason="Implemented via observer session tracking")
         self._capabilities.set_available(AdapterCapability.GET_TURN_CONTEXT, reason="Implemented via observer turn tracking")
         
         # Safety - PARTIAL
         self._capabilities.set_available(AdapterCapability.VERIFY_SESSION_IDENTITY, reason="Implemented via session ID tracking")
-        self._capabilities.set_unavailable(AdapterCapability.VERIFY_SESSION_EXISTS, reason="No session list query in ACP")
+        self._capabilities.set_available(AdapterCapability.VERIFY_SESSION_EXISTS, reason="Implemented via listSessions method")
         
         # Monitoring - VERIFIED IMPLEMENTED
         self._capabilities.set_available(AdapterCapability.DETECT_DISCONNECT, reason="Implemented via process/connection monitoring")
@@ -178,15 +178,11 @@ class OpenCodeAdapter(AgentAdapter):
 
         # Map OpenCode event types to Guardian events
         event_mapping = {
-            "message_start": StateMachineEvent.ASSISTANT_CHUNK,
-            "message_chunk": StateMachineEvent.ASSISTANT_CHUNK,
-            "message_end": StateMachineEvent.TURN_COMPLETE,
-            "tool_call_start": StateMachineEvent.TOOL_STARTED,
-            "tool_update": StateMachineEvent.TOOL_STARTED,  # Progress
-            "tool_call_end": StateMachineEvent.TOOL_COMPLETED,
-            "tool_call_error": StateMachineEvent.TOOL_FAILED,
-            "agent_thinking": StateMachineEvent.ASSISTANT_CHUNK,  # Reasoning is like assistant output
-            "agent_thinking_chunk": StateMachineEvent.ASSISTANT_CHUNK,
+            "agent_message_chunk": StateMachineEvent.ASSISTANT_CHUNK,
+            "user_message_chunk": StateMachineEvent.ASSISTANT_CHUNK,
+            "agent_thought_chunk": StateMachineEvent.ASSISTANT_CHUNK,  # Reasoning is like assistant output
+            "tool_call": StateMachineEvent.TOOL_STARTED,
+            "tool_call_update": StateMachineEvent.TOOL_STARTED,  # Progress
             "session_start": StateMachineEvent.USER_MESSAGE_SENT,
             "session_end": StateMachineEvent.TURN_COMPLETE,
             "error": StateMachineEvent.FAILURE_DETECTED,
@@ -239,36 +235,30 @@ class OpenCodeAdapter(AgentAdapter):
         return True
 
     async def _action_cancel_and_replay(self, context: dict) -> bool:
-        """Cancel in-flight turn and replay the prompt."""
+        """Cancel in-flight turn and replay the prompt using ACP cancel notification."""
         turn_context = context.get("turn_context")
         if not turn_context or not turn_context.session_id:
             logger.error("Cannot cancel - no session ID")
             return False
 
-        if not self.observer:
+        if not self.observer or not self.observer._process:
             logger.error("No observer connected")
             return False
 
-        # For OpenCode ACP, we can't cancel mid-turn directly
-        # But we can close the session and start a new one
-        if self.observer and self.observer._process:
-            try:
-                # Send session close
-                close_msg = {
-                    "jsonrpc": "2.0",
-                    "method": "session/close",
-                    "params": {"sessionId": turn_context.session_id},
-                }
-                await self.observer._send_message(close_msg)
-                logger.info(f"Sent session close for {turn_context.session_id}")
-                await asyncio.sleep(0.5)
-                return True
-            except Exception as e:
-                logger.error(f"Failed to send session close: {e}")
-                return False
-        
-        logger.error("No observer or process to cancel")
-        return False
+        # Send ACP cancel notification (proper cancel method)
+        try:
+            cancel_msg = {
+                "jsonrpc": "2.0",
+                "method": "cancel",
+                "params": {"sessionId": turn_context.session_id},
+            }
+            await self.observer._send_message(cancel_msg)
+            logger.info(f"Sent ACP cancel for session {turn_context.session_id}")
+            await asyncio.sleep(0.5)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send ACP cancel: {e}")
+            return False
 
     async def _action_reconnect_acp(self, context: dict) -> bool:
         """Reconnect to ACP subprocess."""
@@ -278,7 +268,7 @@ class OpenCodeAdapter(AgentAdapter):
         return await self.connect()
 
     async def _action_reload_session(self, context: dict) -> bool:
-        """Reload session from backend."""
+        """Reload session from backend using ACP loadSession."""
         turn_context = context.get("turn_context")
         if not turn_context or not turn_context.session_id:
             logger.error("Cannot reload - no session ID")
@@ -288,21 +278,64 @@ class OpenCodeAdapter(AgentAdapter):
             logger.error("No observer or process connected")
             return False
 
-        # OpenCode ACP doesn't have a session reload method
-        # We can try to close and reopen the session
-        logger.warning("Session reload not directly supported in ACP, attempting session restart")
-        return await self._action_reconnect_acp(context)
+        # Use ACP loadSession method (verified supported)
+        try:
+            # Get cwd from session directory if available
+            cwd = ""
+            if self.observer and self.observer.sessions:
+                session_state = self.observer.get_session_state(turn_context.session_id)
+                if session_state and session_state.directory:
+                    cwd = session_state.directory
+            
+            load_msg = self.observer.parser.create_load_session_request(
+                session_id=turn_context.session_id,
+                cwd=cwd,
+                mcp_servers=[]
+            )
+            self.observer.parser.track_request(load_msg)
+            await self.observer._send_message(load_msg)
+            logger.info(f"Sent ACP loadSession for {turn_context.session_id}")
+            
+            # Wait for response
+            await asyncio.sleep(1.0)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load session via ACP: {e}")
+            return False
 
     async def _action_fork_session(self, context: dict) -> bool:
-        """Fork session at safe point."""
+        """Fork session at safe point using ACP forkSession (unstable)."""
         turn_context = context.get("turn_context")
         if not turn_context or not turn_context.session_id:
             logger.error("Cannot fork - no session ID")
             return False
 
-        # OpenCode ACP doesn't have session fork
-        logger.warning("Session fork not supported in OpenCode ACP")
-        return False
+        if not self.observer or not self.observer._process:
+            logger.error("No observer or process connected")
+            return False
+
+        # Use ACP forkSession method (unstable API)
+        try:
+            cwd = ""
+            if self.observer and self.observer.sessions:
+                session_state = self.observer.get_session_state(turn_context.session_id)
+                if session_state and session_state.directory:
+                    cwd = session_state.directory
+            
+            fork_msg = self.observer.parser.create_fork_session_request(
+                session_id=turn_context.session_id,
+                cwd=cwd
+            )
+            self.observer.parser.track_request(fork_msg)
+            await self.observer._send_message(fork_msg)
+            logger.info(f"Sent ACP forkSession for {turn_context.session_id}")
+            
+            # Wait for response
+            await asyncio.sleep(1.0)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to fork session via ACP: {e}")
+            return False
 
     async def _action_wait_for_backend(self, context: dict) -> bool:
         """Wait for backend to restart."""

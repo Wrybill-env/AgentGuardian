@@ -71,7 +71,7 @@ class OpenCodeSessionState:
             self.tool_calls.clear()
             self.turn_count += 1
         
-        elif event.event_type in (OCPAEventType.MESSAGE_START, OCPAEventType.MESSAGE_CHUNK):
+        elif event.event_type in (OCPAEventType.AGENT_MESSAGE_CHUNK, OCPAEventType.USER_MESSAGE_CHUNK):
             self.assistant_output_observed = True
             self.last_assistant_chunk_timestamp = time.time()
             if self.first_assistant_chunk_timestamp is None:
@@ -80,23 +80,12 @@ class OpenCodeSessionState:
                 self.turn_phase = TurnPhase.ASSISTANT_STREAMING
             self.current_message_id = event.message_id
         
-        elif event.event_type == OCPAEventType.MESSAGE_END:
-            self.turn_phase = TurnPhase.TURN_ENDING
-            self.completion_state = "completed"
-            self.turn_count += 1
-            # Reset per-turn flags for next turn
-            self.assistant_output_observed = False
-            self.tool_activity_observed = False
-            self.partial_tool_names.clear()
-            self.first_assistant_chunk_timestamp = None
-            self.current_message_id = None
-        
-        elif event.event_type == OCPAEventType.AGENT_THINKING:
+        elif event.event_type == OCPAEventType.AGENT_THOUGHT_CHUNK:
             if self.turn_phase in (TurnPhase.USER_MESSAGE_SENT, TurnPhase.IDLE):
                 self.turn_phase = TurnPhase.ASSISTANT_STREAMING
             self.last_reasoning_timestamp = time.time()
         
-        elif event.event_type == OCPAEventType.TOOL_CALL_START:
+        elif event.event_type == OCPAEventType.TOOL_CALL:
             self.tool_activity_observed = True
             self.last_tool_event_timestamp = time.time()
             if event.tool_name:
@@ -107,6 +96,8 @@ class OpenCodeSessionState:
                     "name": event.tool_name,
                     "arguments": event.tool_arguments,
                     "start_time": time.time(),
+                    "kind": event.tool_kind,
+                    "state": "pending"
                 }
             if self.turn_phase in (TurnPhase.USER_MESSAGE_SENT, TurnPhase.ASSISTANT_STREAMING, TurnPhase.IDLE):
                 self.turn_phase = TurnPhase.TOOL_EXECUTING
@@ -116,24 +107,21 @@ class OpenCodeSessionState:
             if event.tool_call_id and event.tool_call_id in self.tool_calls:
                 if event.tool_arguments:
                     self.tool_calls[event.tool_call_id]["arguments"] = event.tool_arguments
+                if event.tool_state:
+                    self.tool_calls[event.tool_call_id]["state"] = event.tool_state
         
-        elif event.event_type == OCPAEventType.TOOL_CALL_END:
-            self.last_tool_event_timestamp = time.time()
-            if event.tool_call_id and event.tool_call_id in self.tool_calls:
-                self.tool_calls[event.tool_call_id]["result"] = event.tool_result
-                self.tool_calls[event.tool_call_id]["end_time"] = time.time()
-                self.tool_calls[event.tool_call_id]["completed"] = True
-            self.current_tool_call_id = None
-        
-        elif event.event_type == OCPAEventType.TOOL_CALL_ERROR:
-            self.last_tool_event_timestamp = time.time()
-            if event.tool_call_id and event.tool_call_id in self.tool_calls:
-                self.tool_calls[event.tool_call_id]["error"] = event.tool_error
-                self.tool_calls[event.tool_call_id]["end_time"] = time.time()
-                self.tool_calls[event.tool_call_id]["failed"] = True
-            if event.tool_error:
-                self.observed_errors.append(f"Tool error: {event.tool_error}")
-            self.current_tool_call_id = None
+        elif event.event_type in (OCPAEventType.SESSION_END, OCPAEventType.SESSION_NOTIFICATION):
+            # Check if this is a prompt completion (from response parsing)
+            if event.event_type == OCPAEventType.SESSION_END:
+                self.turn_phase = TurnPhase.TURN_ENDING
+                self.completion_state = "completed"
+                self.turn_count += 1
+                # Reset per-turn flags for next turn
+                self.assistant_output_observed = False
+                self.tool_activity_observed = False
+                self.partial_tool_names.clear()
+                self.first_assistant_chunk_timestamp = None
+                self.current_message_id = None
         
         elif event.event_type == OCPAEventType.ERROR:
             if event.error_message:
@@ -141,16 +129,12 @@ class OpenCodeSessionState:
             self.completion_state = "error"
             self.turn_phase = TurnPhase.TURN_ENDING
         
-        elif event.event_type == OCPAEventType.SESSION_END:
-            self.completion_state = "completed"
-            self.turn_phase = TurnPhase.IDLE
-        
-        elif event.event_type == OCPAEventType.PERMISSION_REQUEST:
-            # Permission requested - tool may execute after approval
+        elif event.event_type == OCPAEventType.PLAN:
+            # Plan update - could track todo state
             pass
         
-        elif event.event_type == OCPAEventType.PERMISSION_RESPONSE:
-            # Permission response - tool may execute
+        elif event.event_type == OCPAEventType.USAGE_UPDATE:
+            # Usage update - could track token usage
             pass
     
     def is_safe_to_replay(self) -> bool:
@@ -477,12 +461,14 @@ class OpenCodeObserver:
         }
         
         # Add event-specific fields
-        if event.event_type in (OCPAEventType.MESSAGE_START, OCPAEventType.MESSAGE_CHUNK):
+        if event.event_type in (OCPAEventType.AGENT_MESSAGE_CHUNK, OCPAEventType.USER_MESSAGE_CHUNK, OCPAEventType.AGENT_THOUGHT_CHUNK):
             event_dict["text_length"] = len(event.message_content) if event.message_content else 0
-        elif event.event_type in (OCPAEventType.TOOL_CALL_START, OCPAEventType.TOOL_CALL_UPDATE,
-                                  OCPAEventType.TOOL_CALL_END, OCPAEventType.TOOL_CALL_ERROR):
+            event_dict["thinking"] = event.event_type == OCPAEventType.AGENT_THOUGHT_CHUNK
+        elif event.event_type in (OCPAEventType.TOOL_CALL, OCPAEventType.TOOL_CALL_UPDATE):
             event_dict["tool_name"] = event.tool_name
             event_dict["tool_call_id"] = event.tool_call_id
+            event_dict["tool_kind"] = event.tool_kind
+            event_dict["tool_state"] = event.tool_state
         
         if self.on_event:
             self.on_event(event_dict)
