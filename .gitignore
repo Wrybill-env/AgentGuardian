@@ -13,6 +13,8 @@ __pycache__/
 *.backup
 goose_bin/
 goose_extracted/
+agent_guardian.egg-info/
+dist/
 
 # External dependencies (not part of Agent Guardian)
 goose-cli-source/
@@ -26,3 +28,7 @@ goose-cli-source/
 # OS
 .DS_Store
 Thumbs.db
+
+# Debug/temp files
+debug_parser.py
+raw_acp_capture.py

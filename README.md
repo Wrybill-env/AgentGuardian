@@ -1,6 +1,6 @@
 # Agent Guardian
 
-A safety-first reliability layer for AI coding agents — **Hermes, Goose, OpenCode, and FreeBuff**.
+A safety-first reliability layer for AI coding agents — **Hermes, Goose, OpenCode, and Codebuff (FreeBuff)**.
 
 ## Purpose
 
@@ -20,7 +20,7 @@ Required invariants:
 ### Prerequisites
 
 - Python 3.11+
-- At least one supported agent: Hermes, Goose Desktop, OpenCode, or FreeBuff (Codebuff)
+- At least one supported agent: Hermes, Goose Desktop, OpenCode, or Codebuff (FreeBuff)
 
 ### Installation
 
@@ -41,7 +41,7 @@ python -m guardian observe hermes
 # Observe OpenCode (via ACP stdio subprocess)
 python -m guardian observe opencode
 
-# Observe FreeBuff (requires API token)
+# Observe Codebuff/FreeBuff (requires API token)
 python -m guardian observe freebuff --api-token YOUR_TOKEN
 
 # Verbose logging
@@ -105,11 +105,11 @@ python -m guardian observe {goose,hermes,opencode,freebuff} [OPTIONS]
 | `--chunk-gap-threshold` | 15 | Gap between chunks timeout |
 | `--tool-timeout-threshold` | 120 | Tool execution timeout |
 
-**FreeBuff options:**
+**Codebuff/FreeBuff options:**
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--base-url` | https://codebuff.com | API base URL |
-| `--api-token` | (required) | FreeBuff API token |
+| `--api-token` | (required) | Codebuff API token |
 | `--websocket-url` | wss://codebuff.com/ws | WebSocket URL |
 | `--stale-threshold` | 60 | Seconds before stale detection |
 | `--first-chunk-threshold` | 30 | First chunk timeout |
@@ -140,8 +140,8 @@ python -m guardian config {show,set,save} [OPTIONS]
 
 ## Supported Agents & Capabilities
 
-| Capability | Hermes | Goose | OpenCode | FreeBuff (Codebuff) |
-|------------|--------|-------|----------|----------|
+| Capability | Hermes | Goose | OpenCode | Codebuff (FreeBuff) |
+|------------|--------|-------|----------|---------------------|
 | **Observation** | | | | |
 | Stream chunks | ✅ | ✅ | ✅ | ✅ |
 | Reasoning | ✅ | ❌ | ✅ | ❌ |
@@ -197,7 +197,7 @@ python -m guardian config {show,set,save} [OPTIONS]
 | **Hermes** | In-process callbacks | VERIFIED (interface + mock) |
 | **Goose** | ACP WebSocket | VERIFIED (interface + mock + forensic integration) |
 | **OpenCode** | ACP stdio subprocess | VERIFIED (interface + mock + real ACP handshake) |
-| **FreeBuff** | HTTP/WebSocket | DECLARED (interface + mock, blocked by missing credentials) |
+| **Codebuff** | HTTP/WebSocket | DECLARED (interface + mock, blocked by missing credentials) |
 
 ## Safety Invariants — Enforced
 
@@ -242,7 +242,7 @@ C:\Projects\AgentGuardian\
 │   │   ├── adapter.py        # OpenCodeAdapter (AgentAdapter)
 │   │   ├── observer.py       # OpenCodeObserver (ACP stdio)
 │   │   └── protocol.py       # ACP parsing
-│   └── freebuff/             # FreeBuff integration
+│   └── freebuff/             # Codebuff/FreeBuff integration
 │       ├── adapter.py        # FreeBuffAdapter (AgentAdapter)
 │       ├── observer.py       # FreeBuffObserver (WS)
 │       └── protocol.py       # Event parsing
@@ -267,6 +267,7 @@ C:\Projects\AgentGuardian\
 ├── pyproject.toml            # Packaging
 ├── requirements.txt          # Dependencies
 ├── pytest.ini               # Test config
+├── CHANGELOG.md             # Release history
 └── README.md
 ```
 
