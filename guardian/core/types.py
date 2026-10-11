@@ -263,6 +263,10 @@ class TurnContext:
     error_message: Optional[str] = None
     # State generation for TOCTOU protection
     state_generation: int = 0
+    # Verified fresh flag - True only if prior execution state has been verified
+    # (e.g., via persistence). Defaults to False; without persistence, we cannot
+    # verify no restart occurred, so we must treat state as potentially ambiguous.
+    verified_fresh: bool = False
     # Deduplication tracking
     _seen_tool_call_ids: set = field(default_factory=set)
     _completed_tool_call_ids: set = field(default_factory=set)
@@ -275,7 +279,7 @@ class TurnContext:
         return self.tool_calls_started > 0
 
     def is_safe_to_replay(self) -> bool:
-        """Return True only if NO side effects have occurred."""
+        """Return True only if NO side effects have been observed."""
         return not self.has_assistant_output() and not self.has_tool_activity()
 
     def increment_generation(self) -> int:

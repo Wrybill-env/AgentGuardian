@@ -678,7 +678,7 @@ async def test_safety_gate_blocks_replay_after_assistant_output():
     """Verify safety gate blocks replay when assistant output observed."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.assistant_chunks_received = 3
     
     result = gate.check_replay_safety(turn_context)
@@ -692,7 +692,7 @@ async def test_safety_gate_blocks_replay_after_tool_started():
     """Verify safety gate blocks replay when tool activity observed."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.tool_calls_started = 1
     
     result = gate.check_replay_safety(turn_context)
@@ -706,7 +706,7 @@ async def test_safety_gate_allows_replay_when_safe():
     """Verify safety gate allows replay when no side effects."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     
     result = gate.check_replay_safety(turn_context)
     
@@ -718,7 +718,7 @@ async def test_safety_gate_blocks_in_observe_only():
     """Verify safety gate blocks all recovery in OBSERVE_ONLY mode."""
     gate = SafetyGate(safety_mode=SafetyMode.OBSERVE_ONLY)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     
     result = gate.check_recovery_action_safety(
         RecoveryAction.WAIT_AND_RETRY, turn_context
@@ -899,7 +899,7 @@ async def test_recovery_blocked_after_tool_execution():
     """Verify recovery is blocked when tool has executed."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.tool_calls_started = 1
     turn_context.tool_calls_completed = 1
     
@@ -936,7 +936,7 @@ async def test_wait_for_backend_always_safe():
     """Verify WAIT_FOR_BACKEND is always safe (no replay)."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.assistant_chunks_received = 10
     turn_context.tool_calls_started = 5
     
@@ -956,7 +956,7 @@ async def test_recovery_blocked_after_tool_execution():
     """Verify recovery is blocked when tool has executed."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.tool_calls_started = 1
     turn_context.tool_calls_completed = 1
     
@@ -993,7 +993,7 @@ async def test_wait_for_backend_always_safe():
     """Verify WAIT_FOR_BACKEND is always safe (no replay)."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.assistant_chunks_received = 10
     turn_context.tool_calls_started = 5
     
@@ -1028,7 +1028,7 @@ async def test_rate_limit_before_tools_is_replay_safe():
     """Rate limit before any tools should be replay safe."""
     classifier = FailureClassifier()
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     
     result = classifier.classify(
         error_message="429 Too Many Requests",
@@ -1046,7 +1046,7 @@ async def test_rate_limit_after_tools_not_replay_safe():
     """Rate limit after tools should NOT be replay safe."""
     classifier = FailureClassifier()
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.tool_calls_started = 1
     
     result = classifier.classify(
@@ -1069,7 +1069,7 @@ async def test_stale_without_tools_is_replay_safe():
     """Stale stream without tools should be replay safe."""
     classifier = FailureClassifier()
     
-    turn_context = TurnContext(session_id="sess_test")
+    turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     # No tool activity, no assistant output
     
     result = classifier.classify(

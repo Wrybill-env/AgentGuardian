@@ -185,6 +185,26 @@ class SafetyGate:
             )
         
         # AUTO_RECOVER mode - check specific action safety
+        # For actions that could replay the prompt, require verified fresh state
+        # (proof that no restart gap exists). Without persistence, this defaults
+        # to False, meaning replay is blocked after any potential restart.
+        if self.safety_mode == SafetyMode.AUTO_RECOVER:
+            replay_actions = {
+                RecoveryAction.WAIT_AND_RETRY,
+                RecoveryAction.CANCEL_AND_REPLAY,
+                RecoveryAction.RELOAD_SESSION,
+                RecoveryAction.FORK_SESSION,
+            }
+            if action in replay_actions and not turn_context.verified_fresh:
+                return SafetyCheckResult(
+                    verdict=SafetyVerdict.AMBIGUOUS,
+                    reason=(
+                        "Cannot verify turn state is fresh (no restart gap). "
+                        "Prior execution state unknown - automatic replay blocked."
+                    ),
+                    blocking_factors=["Unverified fresh state: potential restart gap"],
+                )
+
         if action == RecoveryAction.WAIT_AND_RETRY:
             # Only safe if no side effects yet
             return self.check_replay_safety(turn_context, failure_classification, session_state)

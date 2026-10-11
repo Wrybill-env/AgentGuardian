@@ -151,6 +151,7 @@ def create_mock_session(
     tools_started: int = 0,
     partial_tool_names: List[str] = None,
     stop_reason: Optional[str] = None,
+    verified_fresh: bool = True,
 ) -> TurnContext:
     """Create a mock turn context for testing."""
     return TurnContext(
@@ -163,6 +164,7 @@ def create_mock_session(
         tool_calls_failed=0,
         last_event_timestamp=0,
         stop_reason=stop_reason,
+        verified_fresh=verified_fresh,
     )
 
 

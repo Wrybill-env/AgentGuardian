@@ -403,9 +403,9 @@ class TestSafetyGate:
 
     def test_auto_recover_checks_safety(self):
         gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
-        turn_context = TurnContext(session_id="sess_test")
+        turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
 
-        # Safe - no activity
+        # Safe - no activity, verified fresh
         result = gate.check_recovery_action_safety(
             RecoveryAction.WAIT_AND_RETRY,
             turn_context,
@@ -419,6 +419,15 @@ class TestSafetyGate:
             turn_context,
         )
         assert result.verdict == SafetyVerdict.UNSAFE
+
+        # Ambiguous - not verified fresh (simulating post-restart)
+        turn_context2 = TurnContext(session_id="sess_test", verified_fresh=False)
+        result = gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY,
+            turn_context2,
+        )
+        assert result.verdict == SafetyVerdict.AMBIGUOUS
+        assert "Unverified fresh state" in str(result.blocking_factors)
 
     def test_reconnect_acp_safety(self):
         gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
@@ -442,27 +451,36 @@ class TestSafetyGate:
     def test_reload_session_safety(self):
         gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
 
-        # Safe with session ID
-        turn_context = TurnContext(session_id="sess_test")
+        # Safe with session ID, verified fresh
+        turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
         result = gate.check_recovery_action_safety(
             RecoveryAction.RELOAD_SESSION,
             turn_context,
         )
         assert result.verdict == SafetyVerdict.SAFE
 
-        # Unsafe without session ID
-        turn_context = TurnContext(session_id="")
+        # Ambiguous - not verified fresh (simulating post-restart)
+        turn_context2 = TurnContext(session_id="sess_test", verified_fresh=False)
         result = gate.check_recovery_action_safety(
             RecoveryAction.RELOAD_SESSION,
-            turn_context,
+            turn_context2,
+        )
+        assert result.verdict == SafetyVerdict.AMBIGUOUS
+        assert "Unverified fresh state" in str(result.blocking_factors)
+
+        # Unsafe without session ID
+        turn_context3 = TurnContext(session_id="", verified_fresh=True)
+        result = gate.check_recovery_action_safety(
+            RecoveryAction.RELOAD_SESSION,
+            turn_context3,
         )
         assert result.verdict == SafetyVerdict.UNSAFE
 
     def test_fork_session_safety(self):
         gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
 
-        # Safe before assistant chunks
-        turn_context = TurnContext(session_id="sess_test")
+        # Safe before assistant chunks, verified fresh
+        turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
         turn_context.phase = TurnPhase.USER_MESSAGE_SENT
         result = gate.check_recovery_action_safety(
             RecoveryAction.FORK_SESSION,
@@ -470,12 +488,23 @@ class TestSafetyGate:
         )
         assert result.verdict == SafetyVerdict.SAFE
 
-        # Ambiguous after streaming started
-        turn_context.phase = TurnPhase.ASSISTANT_STREAMING
-        turn_context.first_chunk_time = time.time()
+        # Ambiguous - not verified fresh (simulating post-restart)
+        turn_context2 = TurnContext(session_id="sess_test", verified_fresh=False)
+        turn_context2.phase = TurnPhase.USER_MESSAGE_SENT
         result = gate.check_recovery_action_safety(
             RecoveryAction.FORK_SESSION,
-            turn_context,
+            turn_context2,
+        )
+        assert result.verdict == SafetyVerdict.AMBIGUOUS
+        assert "Unverified fresh state" in str(result.blocking_factors)
+
+        # Ambiguous after streaming started
+        turn_context3 = TurnContext(session_id="sess_test", verified_fresh=True)
+        turn_context3.phase = TurnPhase.ASSISTANT_STREAMING
+        turn_context3.first_chunk_time = time.time()
+        result = gate.check_recovery_action_safety(
+            RecoveryAction.FORK_SESSION,
+            turn_context3,
         )
         assert result.verdict == SafetyVerdict.AMBIGUOUS
 
