@@ -3,6 +3,7 @@ Tests for Guardian core components.
 """
 
 import time
+import os
 from datetime import datetime
 
 import pytest
@@ -14,9 +15,9 @@ from guardian.core import (
     SafetyMode,
     TurnPhase,
     TurnContext,
-    FailureClassification,
     RecoveryAttempt,
 )
+from guardian.core.types import FailureClassification
 from guardian.core.failure_classifier import FailureClassifier, FAILURE_PATTERNS
 from guardian.core.safety_gate import SafetyGate, SafetyVerdict, SafetyCheckResult
 from guardian.core.backoff import (
@@ -27,6 +28,14 @@ from guardian.core.backoff import (
     CONSERVATIVE_BACKOFF,
 )
 from guardian.core.state_machine import GuardianStateMachine, StateMachineEvent
+from guardian.core.persistence import (
+    StatePersister,
+    create_persisted_session,
+    create_turn_context_from_session,
+    CorruptStateError,
+    IncompatibleStateError,
+    SessionMismatchError,
+)
 
 
 class TestTypes:
@@ -543,6 +552,165 @@ class TestSafetyGate:
         assert result.verdict == SafetyVerdict.UNSAFE
 
 
+class TestSafetyGateRestartSafety:
+    """Tests for restart safety - missing/corrupt persisted state scenarios."""
+
+    def setup_method(self):
+        self.gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
+
+    def test_fresh_process_no_persisted_history(self):
+        """
+        REGRESSION: A fresh process starts with no persisted execution history.
+
+        Expected: Replay actions blocked as AMBIGUOUS (cannot verify no prior execution).
+        verified_fresh defaults to False, so fresh context is treated as potentially restarted.
+        """
+        # Fresh turn context - no persisted state, verified_fresh defaults to False
+        ctx = TurnContext(session_id="new_session")
+
+        # In AUTO_RECOVER mode, replay actions require verified_fresh=True
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY, ctx
+        )
+
+        assert result.verdict == SafetyVerdict.AMBIGUOUS, f"Expected AMBIGUOUS, got {result.verdict}"
+        assert "Unverified fresh state" in str(result.blocking_factors)
+
+        # Verify all replay actions blocked
+        for action in [RecoveryAction.WAIT_AND_RETRY, RecoveryAction.CANCEL_AND_REPLAY,
+                       RecoveryAction.RELOAD_SESSION, RecoveryAction.FORK_SESSION]:
+            result = self.gate.check_recovery_action_safety(action, ctx)
+            assert result.verdict == SafetyVerdict.AMBIGUOUS, f"{action.value} should be AMBIGUOUS"
+
+        # Non-replay actions should still work
+        result = self.gate.check_recovery_action_safety(RecoveryAction.WAIT_FOR_BACKEND, ctx)
+        assert result.verdict == SafetyVerdict.SAFE
+
+    def test_persisted_state_missing(self):
+        """
+        REGRESSION: Persisted state is missing (file doesn't exist).
+
+        Expected: Replay actions blocked as AMBIGUOUS (fail closed).
+        """
+        # Simulate: GuardianConfig.persist_state=True but state file doesn't exist
+        # Fresh context (simulating restart with missing state file)
+        ctx = TurnContext(session_id="test_session", verified_fresh=False)
+
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY, ctx
+        )
+
+        assert result.verdict == SafetyVerdict.AMBIGUOUS
+
+    def test_persisted_state_corrupt(self):
+        """
+        REGRESSION: Persisted state is corrupt (invalid JSON, truncated, etc).
+
+        Expected: Replay actions blocked as AMBIGUOUS (corrupt state cannot be trusted).
+        """
+        # Simulate: We tried to load state but it was corrupt
+        # In current implementation, this means verified_fresh remains False
+        ctx = TurnContext(session_id="test_session", verified_fresh=False)
+
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY, ctx
+        )
+
+        assert result.verdict == SafetyVerdict.AMBIGUOUS
+
+    def test_tool_started_before_crash_blocks_replay(self):
+        """
+        REGRESSION: A tool started before the previous process crashed.
+
+        Expected: Replay actions (WAIT_AND_RETRY, CANCEL_AND_REPLAY) blocked as UNSAFE.
+        RELOAD_SESSION is NOT a replay action - it restores session state.
+        """
+        # Simulate: Tool was started in previous session, but we can't verify completion
+        # Even with verified_fresh=True, tool activity should block REPLAY actions
+        ctx = TurnContext(session_id="test_session", verified_fresh=True)
+        ctx.tool_calls_started = 1  # Tool was started
+        ctx.phase = TurnPhase.TOOL_EXECUTING
+
+        # WAIT_AND_RETRY replays the prompt - should be UNSAFE
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY, ctx
+        )
+        assert result.verdict == SafetyVerdict.UNSAFE
+        assert "Tool activity" in str(result.blocking_factors)
+
+        # CANCEL_AND_REPLAY also replays - should be UNSAFE
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.CANCEL_AND_REPLAY, ctx
+        )
+        assert result.verdict == SafetyVerdict.UNSAFE
+
+        # RELOAD_SESSION restores session state (not replay) - currently SAFE
+        # This is by design: reload doesn't replay the prompt
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.RELOAD_SESSION, ctx
+        )
+        # Note: Current implementation allows RELOAD_SESSION with tool activity
+        # because it restores session history rather than replaying
+
+    def test_tool_completed_not_durably_recorded(self):
+        """
+        REGRESSION: A tool may have completed, but completion was not durably recorded.
+
+        Expected: Replay blocked as UNSAFE (unknown tool state).
+        """
+        ctx = TurnContext(session_id="test_session", verified_fresh=True)
+        ctx.tool_calls_started = 1
+        ctx.tool_calls_completed = 1
+        ctx.phase = TurnPhase.ASSISTANT_STREAMING  # After tool, back to streaming
+
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY, ctx
+        )
+
+        assert result.verdict == SafetyVerdict.UNSAFE
+
+    def test_assistant_output_partial_before_disconnect(self):
+        """
+        REGRESSION: Assistant output was partially emitted before a disconnect.
+
+        Expected: Replay blocked as UNSAFE (output already delivered).
+        """
+        ctx = TurnContext(session_id="test_session", verified_fresh=True)
+        ctx.assistant_chunks_received = 3
+        ctx.phase = TurnPhase.ASSISTANT_STREAMING
+
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY, ctx
+        )
+
+        assert result.verdict == SafetyVerdict.UNSAFE
+        assert "Assistant output observed" in str(result.blocking_factors)
+
+    def test_failure_not_replay_safe_blocks(self):
+        """
+        REGRESSION: Failure classification says not replay-safe.
+
+        Expected: Safety gate blocks replay actions.
+        """
+        # Authentication failure - not replay-safe
+        classification = FailureClassification(
+            failure_type=FailureType.AUTHENTICATION_FAILURE,
+            retryable=False,
+            replay_safe=False,
+            requires_human=True,
+            recommended_action=RecoveryAction.HUMAN_INTERVENTION,
+            confidence=0.9,
+        )
+
+        ctx = TurnContext(session_id="test_session", verified_fresh=True)
+        result = self.gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_AND_RETRY, ctx, failure_classification=classification
+        )
+
+        assert result.verdict == SafetyVerdict.UNSAFE
+        assert "not marked as replay-safe" in str(result.blocking_factors)
+
+
 class TestBackoffStrategy:
     """Tests for BackoffStrategy."""
 
@@ -759,6 +927,250 @@ class TestFailurePatterns:
         for ftype in FailureType:
             if ftype != FailureType.UNKNOWN_FAILURE:
                 assert ftype in covered, f"No pattern for {ftype.value}"
+
+
+class TestPersistence:
+    """Tests for durable state persistence."""
+
+    def setup_method(self):
+        import tempfile
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.storage_path = os.path.join(self.tmpdir.name, "state.json")
+
+    def teardown_method(self):
+        self.tmpdir.cleanup()
+
+    def test_save_and_load_roundtrip(self):
+        """Test saving and loading session state preserves all data."""
+        from guardian.core.session_state import create_session
+
+        persister = StatePersister(self.storage_path)
+        session = create_session("test_session", "test_agent")
+        turn = session.start_turn(turn_id="turn_1", run_id="run_1", user_prompt="test prompt")
+        turn.record_assistant_chunk("Hello")
+        turn.record_assistant_chunk(" world")
+        turn.record_tool_started("write_file", "call_1")
+        turn.record_tool_completed("write_file", "call_1")
+        session.end_turn("end_turn")
+
+        # Save
+        persister.save(session)
+
+        # Load
+        loaded = persister.load("test_session")
+        assert loaded is not None
+        assert loaded.session_id == "test_session"
+        assert loaded.agent_type == "test_agent"
+        assert loaded.total_turns == 1
+        assert loaded.successful_turns == 1
+        assert loaded.failed_turns == 0
+        assert loaded.current_turn is None  # Turn was ended
+        assert len(loaded.turn_history) == 1
+        history_turn = loaded.turn_history[0]
+        assert history_turn.evidence.assistant_chunks_received == 2
+        assert history_turn.evidence.tools_started == ["write_file"]
+        assert history_turn.evidence.tools_completed == ["write_file"]
+        assert history_turn.user_prompt == "test prompt"
+
+    def test_verified_fresh_on_load(self):
+        """Test that loaded state produces verified_fresh=True."""
+        from guardian.core.session_state import create_session
+
+        persister = StatePersister(self.storage_path)
+        session = create_session("test_session", "test_agent")
+        turn = session.start_turn(turn_id="turn_1", user_prompt="test")
+        turn.record_assistant_chunk("Hello")
+        session.end_turn("end_turn")
+        persister.save(session)
+
+        # Load and create turn context
+        loaded = persister.load("test_session")
+        new_session, loaded_state = create_persisted_session("test_session", "test_agent", self.storage_path)
+        ctx = create_turn_context_from_session(new_session, loaded_state)
+
+        assert ctx.verified_fresh is True
+        assert ctx.session_id == "test_session"
+
+    def test_verified_fresh_false_without_persisted_state(self):
+        """Test that missing state file produces verified_fresh=False."""
+        new_session, loaded_state = create_persisted_session("new_session", "test_agent", self.storage_path)
+        ctx = create_turn_context_from_session(new_session, loaded_state)
+
+        assert ctx.verified_fresh is False
+
+    def test_corrupt_json_rejected(self):
+        """Test that invalid JSON is rejected."""
+        with open(self.storage_path, "w") as f:
+            f.write("not valid json")
+
+        persister = StatePersister(self.storage_path)
+        try:
+            loaded = persister.load("test_session")
+            assert False, "Should have raised CorruptStateError"
+        except CorruptStateError:
+            pass  # Expected
+
+    def test_invalid_checksum_rejected(self):
+        """Test that invalid checksum is rejected."""
+        import json
+        import hashlib
+        data = {
+            "version": 1,
+            "session_id": "test_session",
+            "agent_type": "test",
+            "current_turn": None,
+            "turn_history": [],
+            "total_turns": 0,
+            "successful_turns": 0,
+            "failed_turns": 0,
+            "created_at": 1234567890.0,
+            "last_activity": 1234567890.0,
+            "is_persistent": True,
+            "active_recovery": False,
+            "recovery_start_time": None,
+            "timestamp": "2024-01-01T00:00:00",
+            "checksum": "invalid_checksum"
+        }
+        with open(self.storage_path, "w") as f:
+            json.dump(data, f)
+
+        persister = StatePersister(self.storage_path)
+        try:
+            loaded = persister.load("test_session")
+            assert False, "Should have raised CorruptStateError"
+        except CorruptStateError:
+            pass  # Expected
+
+    def test_session_id_mismatch_rejected(self):
+        """Test that session ID mismatch is rejected."""
+        import json
+        import hashlib
+        data = {
+            "version": 1,
+            "session_id": "other_session",
+            "agent_type": "test",
+            "current_turn": None,
+            "turn_history": [],
+            "total_turns": 0,
+            "successful_turns": 0,
+            "failed_turns": 0,
+            "created_at": 1234567890.0,
+            "last_activity": 1234567890.0,
+            "is_persistent": True,
+            "active_recovery": False,
+            "recovery_start_time": None,
+            "timestamp": "2024-01-01T00:00:00",
+        }
+        data_copy = {k: v for k, v in data.items() if k != "checksum"}
+        serialized = json.dumps(data_copy, sort_keys=True, separators=(",", ":"))
+        data["checksum"] = hashlib.sha256(serialized.encode()).hexdigest()
+        with open(self.storage_path, "w") as f:
+            json.dump(data, f)
+
+        persister = StatePersister(self.storage_path)
+        try:
+            loaded = persister.load("test_session")
+            assert False, "Should have raised SessionMismatchError"
+        except SessionMismatchError:
+            pass  # Expected
+
+    def test_version_mismatch_rejected(self):
+        """Test that version mismatch is rejected."""
+        import json
+        import hashlib
+        data = {
+            "version": 999,
+            "session_id": "test_session",
+            "agent_type": "test",
+            "current_turn": None,
+            "turn_history": [],
+            "total_turns": 0,
+            "successful_turns": 0,
+            "failed_turns": 0,
+            "created_at": 1234567890.0,
+            "last_activity": 1234567890.0,
+            "is_persistent": True,
+            "active_recovery": False,
+            "recovery_start_time": None,
+            "timestamp": "2024-01-01T00:00:00",
+        }
+        data_copy = {k: v for k, v in data.items() if k != "checksum"}
+        serialized = json.dumps(data_copy, sort_keys=True, separators=(",", ":"))
+        data["checksum"] = hashlib.sha256(serialized.encode()).hexdigest()
+        with open(self.storage_path, "w") as f:
+            json.dump(data, f)
+
+        persister = StatePersister(self.storage_path)
+        try:
+            loaded = persister.load("test_session")
+            assert False, "Should have raised IncompatibleStateError"
+        except IncompatibleStateError:
+            pass  # Expected
+
+    def test_missing_state_file_returns_none(self):
+        """Test that missing state file returns None (not an error)."""
+        persister = StatePersister(self.storage_path)
+        loaded = persister.load("nonexistent_session")
+        assert loaded is None
+
+    def test_atomic_write_no_partial_files(self):
+        """Test that atomic write doesn't leave partial files on success."""
+        from guardian.core.session_state import create_session
+
+        persister = StatePersister(self.storage_path)
+        session = create_session("test_session", "test")
+        turn = session.start_turn(turn_id="turn_1", user_prompt="test")
+        turn.record_assistant_chunk("Hello")
+        session.end_turn("end_turn")
+
+        persister.save(session)
+
+        # Check no temp files remain
+        temp_files = [f for f in os.listdir(self.tmpdir.name) if f.startswith(".state.json.tmp.")]
+        assert len(temp_files) == 0, f"Temp files left behind: {temp_files}"
+
+        # Verify main file is valid
+        loaded = persister.load("test_session")
+        assert loaded is not None
+
+    def test_persistence_disabled_no_write(self):
+        """Test that is_persistent=False prevents writes."""
+        from guardian.core.session_state import create_session
+
+        persister = StatePersister(self.storage_path)
+        session = create_session("test_session", "test")
+        session.is_persistent = False  # Disable persistence
+        turn = session.start_turn(turn_id="turn_1", user_prompt="test")
+        turn.record_assistant_chunk("Hello")
+        session.end_turn("end_turn")
+
+        persister.save(session)
+
+        # File should not exist
+        assert not os.path.exists(self.storage_path)
+
+    def test_turn_state_roundtrip_with_current_turn(self):
+        """Test saving/loading with an active (not ended) current turn."""
+        from guardian.core.session_state import create_session
+
+        persister = StatePersister(self.storage_path)
+        session = create_session("test_session", "test")
+        turn = session.start_turn(turn_id="turn_1", run_id="run_1", user_prompt="test")
+        turn.record_assistant_chunk("Hello")
+        turn.record_tool_started("write_file", "call_1")
+        # Do NOT end turn - leave it as current_turn
+
+        persister.save(session)
+
+        loaded = persister.load("test_session")
+        assert loaded is not None
+        assert loaded.current_turn is not None
+        assert loaded.current_turn.turn_id == "turn_1"
+        assert loaded.current_turn.run_id == "run_1"
+        assert loaded.current_turn.user_prompt == "test"
+        assert loaded.current_turn.evidence.assistant_chunks_received == 1
+        assert loaded.current_turn.evidence.tools_started == ["write_file"]
+        assert loaded.current_turn.evidence.partial_tool_names == ["write_file"]
 
 
 if __name__ == "__main__":

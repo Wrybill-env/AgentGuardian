@@ -114,6 +114,16 @@ from .adapter_capabilities import (
     GOOSE_CAPABILITIES,
     create_capabilities,
 )
+from .persistence import (
+    StatePersister,
+    PersistenceError,
+    CorruptStateError,
+    IncompatibleStateError,
+    SessionMismatchError,
+    create_persisted_session,
+    create_turn_context_from_session,
+    PERSISTENCE_VERSION,
+)
 
 __all__ = [
     # Types
@@ -220,6 +230,15 @@ __all__ = [
     "HERMES_CAPABILITIES",
     "GOOSE_CAPABILITIES",
     "create_capabilities",
+    # Persistence
+    "StatePersister",
+    "PersistenceError",
+    "CorruptStateError",
+    "IncompatibleStateError",
+    "SessionMismatchError",
+    "create_persisted_session",
+    "create_turn_context_from_session",
+    "PERSISTENCE_VERSION",
     # Failure model
     "FAILURE_TYPE_TO_CATEGORY",
 ]
