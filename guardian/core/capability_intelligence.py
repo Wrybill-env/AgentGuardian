@@ -385,7 +385,9 @@ class CapabilityGapAnalyzer:
             # Determine gap
             is_critical = capability in critical_capabilities
             is_supported = result and result.available
-            is_verified = verification in (VerificationStatus.VERIFIED, VerificationStatus.MOCK_VERIFIED)
+            is_verified = verification in (VerificationStatus.VERIFIED, VerificationStatus.MOCK_VERIFIED, VerificationStatus.SIMULATED)
+            is_unverified = verification == VerificationStatus.UNVERIFIED
+            is_unsafe = verification == VerificationStatus.UNSAFE
             
             if not is_supported and is_critical:
                 # Critical capability missing - gap
@@ -419,8 +421,8 @@ class CapabilityGapAnalyzer:
                     estimated_effort="Low",
                     blocker=None
                 ))
-            elif is_supported and not is_verified:
-                # Supported but unverified - verification gap
+            elif is_supported and is_unverified:
+                # Supported but completely unverified - verification gap
                 gaps.append(CapabilityGap(
                     capability=capability,
                     desired="Verified implementation",
@@ -434,8 +436,8 @@ class CapabilityGapAnalyzer:
                     estimated_effort="Low",
                     blocker="Requires controlled testing"
                 ))
-            elif is_supported and is_verified and verification == VerificationStatus.SIMULATED:
-                # Simulated only - not real protocol recovery
+            elif is_supported and verification == VerificationStatus.SIMULATED:
+                # Supported but only simulated - not real protocol recovery
                 gaps.append(CapabilityGap(
                     capability=capability,
                     desired="Real protocol recovery",

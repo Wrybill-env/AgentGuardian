@@ -41,6 +41,7 @@
 ### Gaps (17)
 | Capability | Status | Resolution | Priority |
 |------------|--------|------------|----------|
+| RECONNECT_STREAM | SIMULATED | Implement real protocol recovery | 3 |
 | CANCEL_STREAM | UNSUPPORTED | BLOCKED - No cancel in Hermes architecture | 2 |
 | REATTACH_SESSION | UNSUPPORTED | ADAPTER_SPECIFIC - No session persistence | 2 |
 | FORK_SESSION | UNSUPPORTED | ADAPTER_SPECIFIC - No session management API | 2 |
