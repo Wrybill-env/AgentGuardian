@@ -145,7 +145,7 @@ class OCPAProtocolParser:
         return {
             "jsonrpc": "2.0",
             "id": self._next_request_id(),
-            "method": "newSession",
+            "method": "session/new",
             "params": {
                 "cwd": cwd,
                 "mcpServers": mcp_servers or []
@@ -170,10 +170,16 @@ class OCPAProtocolParser:
         return {
             "jsonrpc": "2.0",
             "id": self._next_request_id(),
-            "method": "prompt",
+            "method": "session/prompt",
             "params": {
                 "sessionId": session_id,
-                "prompt": prompt
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ],
+                "cwd": "C:/Projects/AgentGuardian"
             }
         }
     
@@ -222,12 +228,16 @@ class OCPAProtocolParser:
             }
         }
     
-    def parse_message(self, data: str) -> Optional[OCPAEvent]:
+    def parse_message(self, data) -> Optional[OCPAEvent]:
         """Parse a JSON-RPC message from OpenCode."""
-        try:
-            msg = json.loads(data.strip())
-        except json.JSONDecodeError:
-            return None
+        # Handle both string and already-parsed dict
+        if isinstance(data, dict):
+            msg = data
+        else:
+            try:
+                msg = json.loads(data.strip())
+            except json.JSONDecodeError:
+                return None
         
         # Handle response
         if "id" in msg and ("result" in msg or "error" in msg):
@@ -272,7 +282,7 @@ class OCPAProtocolParser:
             )
         
         # New session response
-        if pending and pending.get("method") == "newSession":
+        if pending and pending.get("method") == "session/new":
             session_id = result.get("sessionId", "")
             return OCPAEvent(
                 event_type=OCPAEventType.SESSION_START,
@@ -310,12 +320,117 @@ class OCPAProtocolParser:
         method = msg.get("method", "")
         params = msg.get("params", {})
         
-        # Session notification with sessionUpdate
-        if method == "sessionNotification":
+        # Session notification with sessionUpdate (OpenCode uses "session/update")
+        if method in ("sessionNotification", "session/update"):
             update = params.get("update", {})
             session_id = params.get("sessionId", "")
             
-            # Determine update type
+            # OpenCode format: update.sessionUpdate indicates the type
+            session_update_type = update.get("sessionUpdate", "")
+            
+            # Map sessionUpdate types to update fields
+            if session_update_type == "agent_message_chunk":
+                chunk = update.get("agentMessageChunk") or update.get("agent_message_chunk")
+                if chunk:
+                    return OCPAEvent(
+                        event_type=OCPAEventType.AGENT_MESSAGE_CHUNK,
+                        timestamp=datetime.now(),
+                        session_id=session_id,
+                        raw_message=msg,
+                        message_id=chunk.get("messageId"),
+                        message_role="assistant",
+                        message_content=chunk.get("content", ""),
+                        message_done=chunk.get("done", False)
+                    )
+            
+            if session_update_type == "agent_thought_chunk":
+                chunk = update.get("agentThoughtChunk") or update.get("agent_thought_chunk")
+                if chunk:
+                    return OCPAEvent(
+                        event_type=OCPAEventType.AGENT_THOUGHT_CHUNK,
+                        timestamp=datetime.now(),
+                        session_id=session_id,
+                        raw_message=msg,
+                        thinking_content=chunk.get("content", "")
+                    )
+            
+            if session_update_type == "user_message_chunk":
+                chunk = update.get("userMessageChunk") or update.get("user_message_chunk")
+                if chunk:
+                    return OCPAEvent(
+                        event_type=OCPAEventType.USER_MESSAGE_CHUNK,
+                        timestamp=datetime.now(),
+                        session_id=session_id,
+                        raw_message=msg,
+                        message_id=chunk.get("messageId"),
+                        message_role="user",
+                        message_content=chunk.get("content", ""),
+                        message_done=chunk.get("done", False)
+                    )
+            
+            if session_update_type == "tool_call":
+                tool = update.get("toolCall") or update.get("tool_call")
+                if tool:
+                    return OCPAEvent(
+                        event_type=OCPAEventType.TOOL_CALL,
+                        timestamp=datetime.now(),
+                        session_id=session_id,
+                        raw_message=msg,
+                        tool_call_id=tool.get("toolCallId"),
+                        tool_name=tool.get("toolName"),
+                        tool_kind=tool.get("kind"),
+                        tool_arguments=tool.get("arguments", {}),
+                        tool_state="pending"
+                    )
+            
+            if session_update_type == "tool_call_update":
+                tool_update = update.get("toolCallUpdate") or update.get("tool_call_update")
+                if tool_update:
+                    return OCPAEvent(
+                        event_type=OCPAEventType.TOOL_CALL_UPDATE,
+                        timestamp=datetime.now(),
+                        session_id=session_id,
+                        raw_message=msg,
+                        tool_call_id=tool_update.get("toolCallId"),
+                        tool_state=tool_update.get("state"),
+                        tool_result=tool_update.get("result"),
+                        tool_error=tool_update.get("error"),
+                        tool_done=tool_update.get("state") in ("completed", "failed")
+                    )
+            
+            if session_update_type == "plan":
+                plan = update.get("plan")
+                if plan:
+                    return OCPAEvent(
+                        event_type=OCPAEventType.PLAN,
+                        timestamp=datetime.now(),
+                        session_id=session_id,
+                        raw_message=msg,
+                        plan_entries=plan
+                    )
+            
+            if session_update_type == "usage_update":
+                usage = update.get("usageUpdate") or update.get("usage_update")
+                if usage:
+                    return OCPAEvent(
+                        event_type=OCPAEventType.USAGE_UPDATE,
+                        timestamp=datetime.now(),
+                        session_id=session_id,
+                        raw_message=msg,
+                        usage_input_tokens=usage.get("inputTokens"),
+                        usage_output_tokens=usage.get("outputTokens"),
+                        usage_total_cost_usd=usage.get("totalCostUsd")
+                    )
+            
+            if session_update_type == "available_commands_update":
+                return OCPAEvent(
+                    event_type=OCPAEventType.AVAILABLE_COMMANDS_UPDATE,
+                    timestamp=datetime.now(),
+                    session_id=session_id,
+                    raw_message=msg
+                )
+            
+            # Fallback: check for legacy field names (without sessionUpdate)
             if "agentMessageChunk" in update:
                 chunk = update["agentMessageChunk"]
                 return OCPAEvent(
@@ -374,7 +489,7 @@ class OCPAProtocolParser:
                     session_id=session_id,
                     raw_message=msg,
                     tool_call_id=tool_update.get("toolCallId"),
-                    tool_state=tool_update.get("state"),  # in_progress, completed, failed
+                    tool_state=tool_update.get("state"),
                     tool_result=tool_update.get("result"),
                     tool_error=tool_update.get("error"),
                     tool_done=tool_update.get("state") in ("completed", "failed")

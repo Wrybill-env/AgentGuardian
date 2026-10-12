@@ -442,7 +442,16 @@ class OpenCodeObserver:
             return
         
         # Get or create session state
-        session_id = event.session_id or self.parser.session_id or "unknown"
+        session_id = event.session_id
+        if not session_id:
+            # Try to get session_id from pending requests
+            for pending in self.parser._pending_requests.values():
+                params = pending.get("params", {})
+                if "sessionId" in params:
+                    session_id = params["sessionId"]
+                    break
+        if not session_id:
+            session_id = "unknown"
         if session_id not in self.sessions:
             self.sessions[session_id] = OpenCodeSessionState(session_id=session_id)
         
