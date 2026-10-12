@@ -77,6 +77,14 @@ class StatePersister:
             "tools_completed": evidence.tools_completed,
             "tools_failed": evidence.tools_failed,
             "partial_tool_names": evidence.partial_tool_names,
+            # Tool call ID tracking
+            "seen_tool_call_ids": evidence.seen_tool_call_ids,
+            "completed_tool_call_ids": evidence.completed_tool_call_ids,
+            "failed_tool_call_ids": evidence.failed_tool_call_ids,
+            "tool_call_id_map": evidence.tool_call_id_map,
+            # State generation
+            "state_generation": evidence.state_generation,
+            # Timing
             "first_chunk_timestamp": evidence.first_chunk_timestamp,
             "last_chunk_timestamp": evidence.last_chunk_timestamp,
             "last_tool_timestamp": evidence.last_tool_timestamp,
@@ -96,6 +104,14 @@ class StatePersister:
         evidence.tools_completed = data.get("tools_completed", [])
         evidence.tools_failed = data.get("tools_failed", [])
         evidence.partial_tool_names = data.get("partial_tool_names", [])
+        # Tool call ID tracking
+        evidence.seen_tool_call_ids = data.get("seen_tool_call_ids", [])
+        evidence.completed_tool_call_ids = data.get("completed_tool_call_ids", [])
+        evidence.failed_tool_call_ids = data.get("failed_tool_call_ids", [])
+        evidence.tool_call_id_map = data.get("tool_call_id_map", {})
+        # State generation
+        evidence.state_generation = data.get("state_generation", 0)
+        # Timing
         evidence.first_chunk_timestamp = data.get("first_chunk_timestamp")
         evidence.last_chunk_timestamp = data.get("last_chunk_timestamp")
         evidence.last_tool_timestamp = data.get("last_tool_timestamp")
@@ -117,6 +133,7 @@ class StatePersister:
             "recovery_cycles": turn.recovery_cycles,
             "created_at": turn.created_at,
             "updated_at": turn.updated_at,
+            "state_generation": turn.state_generation,
         }
 
     def _deserialize_turn(self, data: dict) -> TurnState:
@@ -132,6 +149,7 @@ class StatePersister:
         turn.recovery_cycles = data.get("recovery_cycles", 0)
         turn.created_at = data.get("created_at", turn.created_at)
         turn.updated_at = data.get("updated_at", turn.updated_at)
+        turn.state_generation = data.get("state_generation", 0)
         return turn
 
     def _serialize_session(self, session: SessionState) -> dict:
@@ -241,21 +259,42 @@ class StatePersister:
                 pass
             raise
 
-    def load(self, session_id: str) -> Optional[SessionState]:
+    # Maximum age of persisted state before it's considered stale (24 hours)
+    MAX_STATE_AGE_SECONDS = 86400
+
+    def load(self, session_id: str, max_age_seconds: Optional[int] = None) -> Optional[SessionState]:
         """
         Load and validate session state from disk.
 
         Returns None if no state file exists (not an error).
-        Raises PersistenceError on validation failure (corrupt, incompatible, etc).
+        Raises PersistenceError on validation failure (corrupt, incompatible, stale, etc).
+        
+        Args:
+            session_id: Expected session ID
+            max_age_seconds: Maximum age of state file in seconds (default: MAX_STATE_AGE_SECONDS)
         """
         if not self.storage_path.exists():
             return None
+
+        max_age = max_age_seconds if max_age_seconds is not None else self.MAX_STATE_AGE_SECONDS
 
         try:
             with open(self.storage_path, "r") as f:
                 data = json.load(f)
         except json.JSONDecodeError as e:
             raise CorruptStateError(f"Invalid JSON: {e}")
+
+        # Check staleness
+        timestamp_str = data.get("timestamp")
+        if timestamp_str:
+            try:
+                persisted_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+                age = (datetime.now() - persisted_time).total_seconds()
+                if age > max_age:
+                    raise CorruptStateError(f"Persisted state is stale (age: {age:.0f}s > max: {max_age}s)")
+            except ValueError:
+                # Invalid timestamp format - treat as stale
+                raise CorruptStateError("Invalid timestamp in persisted state")
 
         # Verify session ID matches
         if data.get("session_id") != session_id:
@@ -277,6 +316,7 @@ def create_persisted_session(
     session_id: str,
     agent_type: str,
     storage_path: str,
+    max_state_age_seconds: Optional[int] = None,
 ) -> tuple[SessionState, Optional[SessionState]]:
     """
     Create a session and attempt to load persisted state.
@@ -292,7 +332,7 @@ def create_persisted_session(
     # Try to load persisted state
     loaded = None
     try:
-        loaded = persister.load(session_id)
+        loaded = persister.load(session_id, max_age_seconds=max_state_age_seconds)
     except PersistenceError as e:
         # Log but don't fail - fail closed means we just don't get verified_fresh
         # In production, log this: logger.warning(f"Failed to load persisted state: {e}")
@@ -359,11 +399,26 @@ def create_turn_context_from_session(
         user_prompt=turn.user_prompt,
         stop_reason=turn.evidence.stop_reason,
         error_message=turn.evidence.error_message,
-        state_generation=0,
+        state_generation=turn.state_generation,
         verified_fresh=verified_fresh,
     )
 
-    # Copy deduplication sets if we have them
-    # Note: These would need to be persisted too for full fidelity
+    # Restore deduplication sets and state_generation from persisted evidence
+    # Priority: current_turn (if it has data) > last turn in history
+    source_turn = None
+    if session.current_turn and (
+        session.current_turn.evidence.tools_started or
+        session.current_turn.evidence.assistant_chunks_received > 0 or
+        session.current_turn.evidence.seen_tool_call_ids
+    ):
+        source_turn = session.current_turn
+    elif session.turn_history:
+        source_turn = session.turn_history[-1]
+    
+    if source_turn and source_turn.evidence:
+        ctx._seen_tool_call_ids = source_turn.evidence.get_seen_tool_call_ids()
+        ctx._completed_tool_call_ids = source_turn.evidence.get_completed_tool_call_ids()
+        ctx._failed_tool_call_ids = source_turn.evidence.get_failed_tool_call_ids()
+        ctx.state_generation = source_turn.state_generation
 
     return ctx

@@ -5,7 +5,7 @@ Agent-agnostic state model that tracks side-effect evidence for safety decisions
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 import time
 
 from .types import (
@@ -28,6 +28,16 @@ class SideEffectEvidence:
     tools_failed: List[str] = field(default_factory=list)
     partial_tool_names: List[str] = field(default_factory=list)
     
+    # Tool call ID tracking (for deduplication across restarts)
+    seen_tool_call_ids: List[str] = field(default_factory=list)
+    completed_tool_call_ids: List[str] = field(default_factory=list)
+    failed_tool_call_ids: List[str] = field(default_factory=list)
+    # Map tool_name -> list of tool_call_ids for that tool
+    tool_call_id_map: Dict[str, List[str]] = field(default_factory=dict)
+    
+    # State generation for TOCTOU protection
+    state_generation: int = 0
+    
     # Timing
     first_chunk_timestamp: Optional[float] = None
     last_chunk_timestamp: Optional[float] = None
@@ -38,6 +48,34 @@ class SideEffectEvidence:
     turn_phase: TurnPhase = TurnPhase.IDLE
     stop_reason: Optional[str] = None
     error_message: Optional[str] = None
+    
+    def get_seen_tool_call_ids(self) -> Set[str]:
+        return set(self.seen_tool_call_ids)
+    
+    def get_completed_tool_call_ids(self) -> Set[str]:
+        return set(self.completed_tool_call_ids)
+    
+    def get_failed_tool_call_ids(self) -> Set[str]:
+        return set(self.failed_tool_call_ids)
+    
+    def get_tool_call_ids_for_tool(self, tool_name: str) -> List[str]:
+        return self.tool_call_id_map.get(tool_name, [])
+    
+    def add_seen_tool_call_id(self, tool_call_id: str, tool_name: str):
+        if tool_call_id not in self.seen_tool_call_ids:
+            self.seen_tool_call_ids.append(tool_call_id)
+        if tool_name not in self.tool_call_id_map:
+            self.tool_call_id_map[tool_name] = []
+        if tool_call_id not in self.tool_call_id_map[tool_name]:
+            self.tool_call_id_map[tool_name].append(tool_call_id)
+    
+    def mark_tool_completed(self, tool_call_id: str, tool_name: str):
+        if tool_call_id not in self.completed_tool_call_ids:
+            self.completed_tool_call_ids.append(tool_call_id)
+    
+    def mark_tool_failed(self, tool_call_id: str, tool_name: str):
+        if tool_call_id not in self.failed_tool_call_ids:
+            self.failed_tool_call_ids.append(tool_call_id)
     
     def get_categories(self) -> List[SideEffectCategory]:
         """Get all observed side-effect categories."""
@@ -101,10 +139,17 @@ class TurnState:
     recovery_cycles: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    
+    # State generation for TOCTOU protection (persisted)
+    state_generation: int = 0
+
     def update_timestamp(self):
         self.updated_at = time.time()
-    
+
+    def increment_generation(self) -> int:
+        """Increment state generation for TOCTOU protection."""
+        self.state_generation += 1
+        return self.state_generation
+
     def record_assistant_chunk(self, text: str = "", is_reasoning: bool = False):
         """Record an assistant chunk."""
         self.evidence.assistant_chunks_received += 1
@@ -117,39 +162,49 @@ class TurnState:
             self.evidence.reasoning_chunks_received += 1
         self.evidence.turn_phase = TurnPhase.ASSISTANT_STREAMING
         self.update_timestamp()
-    
+        self.increment_generation()
+
     def record_tool_started(self, tool_name: str, tool_call_id: str = None):
         """Record tool execution start."""
         self.evidence.tools_started.append(tool_name)
         if tool_call_id:
             self.evidence.partial_tool_names.append(tool_name)
+            self.evidence.add_seen_tool_call_id(tool_call_id, tool_name)
         self.evidence.last_tool_timestamp = time.time()
         self.evidence.turn_phase = TurnPhase.TOOL_EXECUTING
         self.update_timestamp()
-    
+        self.increment_generation()
+
     def record_tool_progress(self, tool_name: str):
         """Record tool progress."""
         self.evidence.last_tool_timestamp = time.time()
         self.update_timestamp()
-    
+        self.increment_generation()
+
     def record_tool_completed(self, tool_name: str, tool_call_id: str = None):
         """Record tool completion."""
         if tool_name in self.evidence.tools_started:
             self.evidence.tools_completed.append(tool_name)
-        if tool_call_id and tool_name in self.evidence.partial_tool_names:
-            self.evidence.partial_tool_names.remove(tool_name)
+        if tool_call_id:
+            self.evidence.mark_tool_completed(tool_call_id, tool_name)
+            if tool_name in self.evidence.partial_tool_names:
+                self.evidence.partial_tool_names.remove(tool_name)
         self.evidence.last_tool_timestamp = time.time()
         self.evidence.turn_phase = TurnPhase.ASSISTANT_STREAMING
         self.update_timestamp()
-    
+        self.increment_generation()
+
     def record_tool_failed(self, tool_name: str, tool_call_id: str = None):
         """Record tool failure."""
         if tool_name in self.evidence.tools_started:
             self.evidence.tools_failed.append(tool_name)
-        if tool_call_id and tool_name in self.evidence.partial_tool_names:
-            self.evidence.partial_tool_names.remove(tool_name)
+        if tool_call_id:
+            self.evidence.mark_tool_failed(tool_call_id, tool_name)
+            if tool_name in self.evidence.partial_tool_names:
+                self.evidence.partial_tool_names.remove(tool_name)
         self.evidence.last_tool_timestamp = time.time()
         self.update_timestamp()
+        self.increment_generation()
     
     def record_turn_end(self, stop_reason: str = "end_turn", error: str = None):
         """Record turn completion."""

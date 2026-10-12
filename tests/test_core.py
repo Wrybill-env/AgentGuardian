@@ -1045,6 +1045,7 @@ class TestPersistence:
         """Test that session ID mismatch is rejected."""
         import json
         import hashlib
+        from datetime import datetime
         data = {
             "version": 1,
             "session_id": "other_session",
@@ -1059,7 +1060,7 @@ class TestPersistence:
             "is_persistent": True,
             "active_recovery": False,
             "recovery_start_time": None,
-            "timestamp": "2024-01-01T00:00:00",
+            "timestamp": datetime.now().isoformat(),
         }
         data_copy = {k: v for k, v in data.items() if k != "checksum"}
         serialized = json.dumps(data_copy, sort_keys=True, separators=(",", ":"))
@@ -1069,7 +1070,7 @@ class TestPersistence:
 
         persister = StatePersister(self.storage_path)
         try:
-            loaded = persister.load("test_session")
+            loaded = persister.load("test_session", max_age_seconds=86400*365)
             assert False, "Should have raised SessionMismatchError"
         except SessionMismatchError:
             pass  # Expected
@@ -1078,6 +1079,7 @@ class TestPersistence:
         """Test that version mismatch is rejected."""
         import json
         import hashlib
+        from datetime import datetime
         data = {
             "version": 999,
             "session_id": "test_session",
@@ -1092,7 +1094,7 @@ class TestPersistence:
             "is_persistent": True,
             "active_recovery": False,
             "recovery_start_time": None,
-            "timestamp": "2024-01-01T00:00:00",
+            "timestamp": datetime.now().isoformat(),
         }
         data_copy = {k: v for k, v in data.items() if k != "checksum"}
         serialized = json.dumps(data_copy, sort_keys=True, separators=(",", ":"))
