@@ -17,6 +17,7 @@ from enum import Enum
 
 from .types import TurnPhase, SideEffectCategory
 from .session_state import SessionState, TurnState, SideEffectEvidence, create_session
+from .file_lock import FileLock
 
 
 # Persistence format version - increment on breaking schema changes
@@ -59,6 +60,7 @@ class StatePersister:
     def __init__(self, storage_path: str):
         self.storage_path = Path(storage_path).expanduser()
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = FileLock(str(self.storage_path) + ".lock")
 
     def _compute_checksum(self, data: dict) -> str:
         """Compute SHA256 checksum of serializable data (excluding checksum field)."""
@@ -223,93 +225,97 @@ class StatePersister:
         Atomically save session state to disk.
 
         Uses temp file + atomic rename to prevent partial writes.
+        Uses file locking to prevent concurrent writes.
         On Windows, concurrent writes may fail with AccessDenied - caller should retry.
         """
         if not session.is_persistent:
             return
 
-        data = self._serialize_session(session)
+        with self._lock:
+            data = self._serialize_session(session)
 
-        # Write to temp file first
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.storage_path.parent,
-            prefix=f".{self.storage_path.name}.tmp.",
-            suffix=".json",
-            delete=False,
-        ) as tmp:
-            json.dump(data, tmp, separators=(",", ":"))
-            tmp_path = Path(tmp.name)
+            # Write to temp file first
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.storage_path.parent,
+                prefix=f".{self.storage_path.name}.tmp.",
+                suffix=".json",
+                delete=False,
+            ) as tmp:
+                json.dump(data, tmp, separators=(",", ":"))
+                tmp_path = Path(tmp.name)
 
-        try:
-            # Atomic rename (POSIX) or replace (Windows)
-            tmp_path.replace(self.storage_path)
-        except PermissionError:
-            # On Windows, concurrent replace can fail - clean up and re-raise
             try:
-                tmp_path.unlink(missing_ok=True)
+                # Atomic rename (POSIX) or replace (Windows)
+                tmp_path.replace(self.storage_path)
+            except PermissionError:
+                # On Windows, concurrent replace can fail - clean up and re-raise
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
             except Exception:
-                pass
-            raise
-        except Exception:
-            # Clean up temp file on failure
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise
+                # Clean up temp file on failure
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
 
     # Maximum age of persisted state before it's considered stale (24 hours)
     MAX_STATE_AGE_SECONDS = 86400
 
     def load(self, session_id: str, max_age_seconds: Optional[int] = None) -> Optional[SessionState]:
-        """
-        Load and validate session state from disk.
+            """
+            Load and validate session state from disk.
 
-        Returns None if no state file exists (not an error).
-        Raises PersistenceError on validation failure (corrupt, incompatible, stale, etc).
-        
-        Args:
-            session_id: Expected session ID
-            max_age_seconds: Maximum age of state file in seconds (default: MAX_STATE_AGE_SECONDS)
-        """
-        if not self.storage_path.exists():
-            return None
+            Returns None if no state file exists (not an error).
+            Raises PersistenceError on validation failure (corrupt, incompatible, stale, etc).
 
-        max_age = max_age_seconds if max_age_seconds is not None else self.MAX_STATE_AGE_SECONDS
+            Args:
+                session_id: Expected session ID
+                max_age_seconds: Maximum age of state file in seconds (default: MAX_STATE_AGE_SECONDS)
+            """
+            with self._lock:
+                if not self.storage_path.exists():
+                    return None
 
-        try:
-            with open(self.storage_path, "r") as f:
-                data = json.load(f)
-        except json.JSONDecodeError as e:
-            raise CorruptStateError(f"Invalid JSON: {e}")
+                max_age = max_age_seconds if max_age_seconds is not None else self.MAX_STATE_AGE_SECONDS
 
-        # Check staleness
-        timestamp_str = data.get("timestamp")
-        if timestamp_str:
-            try:
-                persisted_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-                age = (datetime.now() - persisted_time).total_seconds()
-                if age > max_age:
-                    raise CorruptStateError(f"Persisted state is stale (age: {age:.0f}s > max: {max_age}s)")
-            except ValueError:
-                # Invalid timestamp format - treat as stale
-                raise CorruptStateError("Invalid timestamp in persisted state")
+                try:
+                    with open(self.storage_path, "r") as f:
+                        data = json.load(f)
+                except json.JSONDecodeError as e:
+                    raise CorruptStateError(f"Invalid JSON: {e}")
 
-        # Verify session ID matches
-        if data.get("session_id") != session_id:
-            raise SessionMismatchError(
-                f"Persisted session_id '{data.get('session_id')}' != requested '{session_id}'"
-            )
+                # Check staleness
+                timestamp_str = data.get("timestamp")
+                if timestamp_str:
+                    try:
+                        persisted_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+                        age = (datetime.now() - persisted_time).total_seconds()
+                        if age > max_age:
+                            raise CorruptStateError(f"Persisted state is stale (age: {age:.0f}s > max: {max_age}s)")
+                    except ValueError:
+                        # Invalid timestamp format - treat as stale
+                        raise CorruptStateError("Invalid timestamp in persisted state")
 
-        return self._deserialize_session(data)
+                # Verify session ID matches
+                if data.get("session_id") != session_id:
+                    raise SessionMismatchError(
+                        f"Persisted session_id '{data.get('session_id')}' != requested '{session_id}'"
+                    )
+
+                return self._deserialize_session(data)
 
     def delete(self) -> None:
         """Delete persisted state file."""
-        try:
-            self.storage_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                self.storage_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def create_persisted_session(
@@ -384,26 +390,7 @@ def create_turn_context_from_session(
     # verified_fresh is True ONLY if we successfully loaded and validated persisted state
     verified_fresh = loaded_state is not None
 
-    ctx = TurnContext(
-        session_id=session.session_id,
-        run_id=turn.run_id,
-        phase=turn.evidence.turn_phase,
-        assistant_chunks_received=turn.evidence.assistant_chunks_received,
-        tool_calls_started=len(turn.evidence.tools_started),
-        tool_calls_completed=len(turn.evidence.tools_completed),
-        tool_calls_failed=len(turn.evidence.tools_failed),
-        last_event_timestamp=turn.evidence.last_chunk_timestamp or turn.evidence.last_tool_timestamp or turn.evidence.turn_start_timestamp,
-        last_assistant_chunk_time=turn.evidence.last_chunk_timestamp,
-        last_tool_event_time=turn.evidence.last_tool_timestamp,
-        first_chunk_time=turn.evidence.first_chunk_timestamp,
-        user_prompt=turn.user_prompt,
-        stop_reason=turn.evidence.stop_reason,
-        error_message=turn.evidence.error_message,
-        state_generation=turn.state_generation,
-        verified_fresh=verified_fresh,
-    )
-
-    # Restore deduplication sets and state_generation from persisted evidence
+    # Determine source for tool activity counts
     # Priority: current_turn (if it has data) > last turn in history
     source_turn = None
     if session.current_turn and (
@@ -414,7 +401,35 @@ def create_turn_context_from_session(
         source_turn = session.current_turn
     elif session.turn_history:
         source_turn = session.turn_history[-1]
-    
+
+    # Use source_turn evidence if available, otherwise use current turn
+    if source_turn and source_turn.evidence:
+        evidence = source_turn.evidence
+        state_gen = source_turn.state_generation
+    else:
+        evidence = turn.evidence
+        state_gen = turn.state_generation
+
+    ctx = TurnContext(
+        session_id=session.session_id,
+        run_id=turn.run_id,
+        phase=evidence.turn_phase,
+        assistant_chunks_received=evidence.assistant_chunks_received,
+        tool_calls_started=len(evidence.tools_started),
+        tool_calls_completed=len(evidence.tools_completed),
+        tool_calls_failed=len(evidence.tools_failed),
+        last_event_timestamp=evidence.last_chunk_timestamp or evidence.last_tool_timestamp or evidence.turn_start_timestamp,
+        last_assistant_chunk_time=evidence.last_chunk_timestamp,
+        last_tool_event_time=evidence.last_tool_timestamp,
+        first_chunk_time=evidence.first_chunk_timestamp,
+        user_prompt=turn.user_prompt,
+        stop_reason=evidence.stop_reason,
+        error_message=evidence.error_message,
+        state_generation=state_gen,
+        verified_fresh=verified_fresh,
+    )
+
+    # Restore deduplication sets from persisted evidence
     if source_turn and source_turn.evidence:
         ctx._seen_tool_call_ids = source_turn.evidence.get_seen_tool_call_ids()
         ctx._completed_tool_call_ids = source_turn.evidence.get_completed_tool_call_ids()

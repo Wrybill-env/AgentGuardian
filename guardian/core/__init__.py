@@ -124,6 +124,7 @@ from .persistence import (
     create_turn_context_from_session,
     PERSISTENCE_VERSION,
 )
+from .file_lock import FileLock
 
 __all__ = [
     # Types
@@ -239,6 +240,8 @@ __all__ = [
     "create_persisted_session",
     "create_turn_context_from_session",
     "PERSISTENCE_VERSION",
+    # File locking
+    "FileLock",
     # Failure model
     "FAILURE_TYPE_TO_CATEGORY",
 ]
