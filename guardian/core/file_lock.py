@@ -44,43 +44,47 @@ class FileLock:
         self._acquired = False
     
     def acquire(self) -> bool:
-        """Acquire the lock. Returns True if successful."""
-        if self._acquired:
-            return True
-            
-        # Ensure lock file exists
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Open lock file
-        flags = os.O_CREAT | os.O_RDWR
-        if HAS_MSVCRT:
-            self._fd = os.open(str(self.lock_path), flags)
-        else:
-            self._fd = os.open(str(self.lock_path), flags)
-        
-        try:
-            if HAS_MSVCRT:
-                # Windows: use msvcrt.locking (mandatory)
-                import time
-                start = time.time()
-                while time.time() - start < self.timeout:
-                    try:
-                        msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
-                        self._acquired = True
-                        return True
-                    except OSError:
-                        time.sleep(0.1)
-                return False
-            else:
-                # POSIX: use fcntl.flock (advisory)
-                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
-                self._acquired = True
+            """Acquire the lock. Returns True if successful."""
+            if self._acquired:
                 return True
-        except (OSError, IOError):
-            if self._fd is not None:
-                os.close(self._fd)
-                self._fd = None
-            return False
+           
+            # Ensure lock file exists
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        
+            # Open lock file
+            flags = os.O_CREAT | os.O_RDWR
+            if HAS_MSVCRT:
+                self._fd = os.open(str(self.lock_path), flags)
+            else:
+                self._fd = os.open(str(self.lock_path), flags)
+        
+            try:
+                if HAS_MSVCRT:
+                    # Windows: use msvcrt.locking (mandatory)
+                    import time
+                    start = time.time()
+                    while time.time() - start < self.timeout:
+                        try:
+                            msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+                            self._acquired = True
+                            return True
+                        except OSError:
+                            time.sleep(0.1)
+                    # Failed to acquire - close the file descriptor
+                    if self._fd is not None:
+                        os.close(self._fd)
+                        self._fd = None
+                    return False
+                else:
+                    # POSIX: use fcntl.flock (advisory)
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
+                    self._acquired = True
+                    return True
+            except (OSError, IOError):
+                if self._fd is not None:
+                    os.close(self._fd)
+                    self._fd = None
+                return False
     
     def release(self) -> None:
         """Release the lock."""
