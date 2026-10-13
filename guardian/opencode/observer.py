@@ -116,10 +116,10 @@ class OpenCodeSessionState:
                 self.turn_phase = TurnPhase.TURN_ENDING
                 self.completion_state = "completed"
                 self.turn_count += 1
-                # Reset per-turn flags for next turn
-                self.assistant_output_observed = False
-                self.tool_activity_observed = False
-                self.partial_tool_names.clear()
+                # NOTE: Do NOT reset assistant_output_observed, tool_activity_observed,
+                # partial_tool_names, or tool_calls here. These represent side effects
+                # that occurred in this turn and must be preserved for safety evaluation
+                # after the turn ends. They will be reset on the next SESSION_START.
                 self.first_assistant_chunk_timestamp = None
                 self.current_message_id = None
         

@@ -242,6 +242,20 @@ class SafetyGate:
                 blocking_factors=["Missing session_id"],
             )
         
+        elif action == RecoveryAction.RECONNECT_STREAM:
+            # Same as RECONNECT_ACP - reconnection doesn't replay prompts
+            if turn_context.session_id:
+                return SafetyCheckResult(
+                    verdict=SafetyVerdict.SAFE,
+                    reason="Stream reconnection preserves session, no prompt replay",
+                    details={"session_id": turn_context.session_id},
+                )
+            return SafetyCheckResult(
+                verdict=SafetyVerdict.AMBIGUOUS,
+                reason="No session ID available to verify identity after reconnect",
+                blocking_factors=["Missing session_id"],
+            )
+        
         elif action == RecoveryAction.RELOAD_SESSION:
             # Requires known session ID and session still exists
             if not turn_context.session_id:
