@@ -262,11 +262,64 @@ class OpenCodeAdapter(AgentAdapter):
             return False
 
     async def _action_reconnect_acp(self, context: dict) -> bool:
-        """Reconnect to ACP subprocess."""
+        """Reconnect to ACP subprocess and verify session identity."""
+        turn_context = context.get("turn_context")
+        session_id = turn_context.session_id if turn_context else None
+        
         logger.info("Reconnecting to OpenCode ACP...")
         await self.disconnect()
         await asyncio.sleep(1.0)
-        return await self.connect()
+        
+        # Reconnect
+        if not await self.connect():
+            logger.error("Failed to reconnect to OpenCode ACP")
+            return False
+        
+        # Verify session identity using loadSession
+        if session_id and self.observer and self.observer._process:
+            try:
+                # Get cwd from session directory if available
+                cwd = ""
+                if self.observer and self.observer.sessions:
+                    session_state = self.observer.get_session_state(session_id)
+                    if session_state and session_state.directory:
+                        cwd = session_state.directory
+                
+                load_msg = self.observer.parser.create_load_session_request(
+                    session_id=session_id,
+                    cwd=cwd,
+                    mcp_servers=[]
+                )
+                self.observer.parser.track_request(load_msg)
+                await self.observer._send_message(load_msg)
+                logger.info(f"Sent loadSession to verify identity for {session_id}")
+                
+                # Wait for response and verify success
+                try:
+                    response_line = await asyncio.wait_for(
+                        self.observer._process.stdout.readline(),
+                        timeout=10.0
+                    )
+                    if response_line:
+                        response = json.loads(response_line.strip())
+                        if "error" in response:
+                            logger.error(f"Session identity verification failed: {response['error']}")
+                            return False
+                        # Verify the returned session ID matches
+                        returned_session_id = response.get("result", {}).get("sessionId")
+                        if returned_session_id != session_id:
+                            logger.error(f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}")
+                            return False
+                        logger.info(f"Session identity verified after reconnect: {session_id}")
+                        return True
+                except asyncio.TimeoutError:
+                    logger.error("Session identity verification timeout")
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to verify session identity after reconnect: {e}")
+                return False
+        
+        return True
 
     async def _action_reload_session(self, context: dict) -> bool:
         """Reload session from backend using ACP loadSession."""
@@ -434,12 +487,45 @@ class OpenCodeAdapter(AgentAdapter):
         
         try:
             if action == RecoveryAction.RECONNECT_STREAM:
-                # Verify process is running and responsive
+                # Verify process is running AND session identity is preserved
                 if self.observer and self.observer._process:
-                    return self.observer._process.poll() is None, {
-                        "verified": "process_running", 
-                        "session_id": session_id
-                    }
+                    if self.observer._process.poll() is None:
+                        # Verify session identity using loadSession
+                        try:
+                            cwd = ""
+                            if self.observer and self.observer.sessions:
+                                session_state = self.observer.get_session_state(session_id)
+                                if session_state and session_state.directory:
+                                    cwd = session_state.directory
+                            
+                            load_msg = self.observer.parser.create_load_session_request(
+                                session_id=session_id,
+                                cwd=cwd,
+                                mcp_servers=[]
+                            )
+                            self.observer.parser.track_request(load_msg)
+                            await self.observer._send_message(load_msg)
+                            
+                            response_line = await asyncio.wait_for(
+                                self.observer._process.stdout.readline(),
+                                timeout=10.0
+                            )
+                            if response_line:
+                                response = json.loads(response_line.strip())
+                                if "error" in response:
+                                    return False, {"error": f"Session identity verification failed: {response['error']}"}
+                                returned_session_id = response.get("result", {}).get("sessionId")
+                                if returned_session_id != session_id:
+                                    return False, {"error": f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}"}
+                                return True, {
+                                    "verified": "process_running_and_session_identity_verified",
+                                    "session_id": session_id
+                                }
+                        except asyncio.TimeoutError:
+                            return False, {"error": "Session identity verification timeout"}
+                        except Exception as e:
+                            return False, {"error": f"Session identity verification failed: {e}"}
+                    return False, {"error": "Process not running after reconnect"}
                 return False, {"error": "Process not running after reconnect"}
             
             elif action == RecoveryAction.RELOAD_SESSION:

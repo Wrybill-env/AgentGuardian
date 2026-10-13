@@ -194,6 +194,7 @@ class SafetyGate:
                 RecoveryAction.CANCEL_AND_REPLAY,
                 RecoveryAction.RELOAD_SESSION,
                 RecoveryAction.FORK_SESSION,
+                RecoveryAction.RECONNECT_STREAM,
             }
             if action in replay_actions and not turn_context.verified_fresh:
                 return SafetyCheckResult(
