@@ -424,6 +424,16 @@ class OpenCodeObserver:
             logger.error(f"Request missing valid integer id: {request}")
             return None
         
+        # Reject duplicate request IDs
+        if request_id in self._response_futures:
+            logger.error(f"Duplicate request ID {request_id}")
+            return None
+        
+        # Also check against parser's pending requests
+        if request_id in self.parser._pending_requests:
+            logger.error(f"Request ID {request_id} already pending in parser")
+            return None
+        
         # Create future for response
         future = asyncio.get_event_loop().create_future()
         self._response_futures[request_id] = future
@@ -545,6 +555,12 @@ class OpenCodeObserver:
     async def disconnect(self):
         """Disconnect from OpenCode."""
         self._running = False
+        
+        # Clean up pending futures - fail them with connection error
+        for future in self._response_futures.values():
+            if not future.done():
+                future.set_exception(ConnectionError("Observer disconnected"))
+        self._response_futures.clear()
         
         if self._read_task and not self._read_task.done():
             self._read_task.cancel()

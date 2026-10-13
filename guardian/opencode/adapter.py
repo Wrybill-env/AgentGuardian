@@ -266,6 +266,11 @@ class OpenCodeAdapter(AgentAdapter):
         turn_context = context.get("turn_context")
         session_id = turn_context.session_id if turn_context else None
         
+        # Missing session ID → fail closed
+        if not session_id:
+            logger.error("Reconnect failed: no session ID in context")
+            return False
+        
         logger.info("Reconnecting to OpenCode ACP...")
         await self.disconnect()
         await asyncio.sleep(1.0)
@@ -276,44 +281,45 @@ class OpenCodeAdapter(AgentAdapter):
             return False
         
         # Verify session identity using loadSession
-        if session_id and self.observer and self.observer._process:
-            try:
-                # Get cwd from session directory if available
-                cwd = ""
-                if self.observer and self.observer.sessions:
-                    session_state = self.observer.get_session_state(session_id)
-                    if session_state and session_state.directory:
-                        cwd = session_state.directory
-                
-                load_msg = self.observer.parser.create_load_session_request(
-                    session_id=session_id,
-                    cwd=cwd,
-                    mcp_servers=[]
-                )
-                # Use the observer's send_request for proper response correlation
-                response = await self.observer.send_request(load_msg, timeout=10.0)
-                
-                if not response:
-                    logger.error("Session identity verification failed: no response")
-                    return False
-                
-                if "error" in response:
-                    logger.error(f"Session identity verification failed: {response['error']}")
-                    return False
-                
-                # Verify the returned session ID matches
-                returned_session_id = response.get("result", {}).get("sessionId")
-                if returned_session_id != session_id:
-                    logger.error(f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}")
-                    return False
-                
-                logger.info(f"Session identity verified after reconnect: {session_id}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to verify session identity after reconnect: {e}")
-                return False
+        if not self.observer or not self.observer._process:
+            logger.error("Reconnect failed: observer or process missing after reconnect")
+            return False
         
-        return True
+        try:
+            # Get cwd from session directory if available
+            cwd = ""
+            if self.observer and self.observer.sessions:
+                session_state = self.observer.get_session_state(session_id)
+                if session_state and session_state.directory:
+                    cwd = session_state.directory
+            
+            load_msg = self.observer.parser.create_load_session_request(
+                session_id=session_id,
+                cwd=cwd,
+                mcp_servers=[]
+            )
+            # Use the observer's send_request for proper response correlation
+            response = await self.observer.send_request(load_msg, timeout=10.0)
+            
+            if not response:
+                logger.error("Session identity verification failed: no response")
+                return False
+            
+            if "error" in response:
+                logger.error(f"Session identity verification failed: {response['error']}")
+                return False
+            
+            # Verify the returned session ID matches
+            returned_session_id = response.get("result", {}).get("sessionId")
+            if returned_session_id != session_id:
+                logger.error(f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}")
+                return False
+            
+            logger.info(f"Session identity verified after reconnect: {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to verify session identity after reconnect: {e}")
+            return False
 
     async def _action_reload_session(self, context: dict) -> bool:
         """Reload session from backend using ACP loadSession."""
