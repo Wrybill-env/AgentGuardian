@@ -329,6 +329,8 @@ class OpenCodeObserver:
         self._running = False
         self._stale_check_task: Optional[asyncio.Task] = None
         self._read_task: Optional[asyncio.Task] = None
+        # Response futures for request/response correlation
+        self._response_futures: Dict[int, asyncio.Future] = {}
     
     async def connect_acp(self, opencode_path: str = "opencode") -> bool:
         """Connect to OpenCode via ACP stdio subprocess."""
@@ -403,6 +405,45 @@ class OpenCodeObserver:
         except Exception as e:
             logger.error(f"Failed to send message to OpenCode: {e}")
             return False
+
+    async def send_request(self, request: Dict[str, Any], timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+        """Send a request and wait for its response.
+        
+        Args:
+            request: The JSON-RPC request to send (must have an 'id' field)
+            timeout: Maximum time to wait for response
+            
+        Returns:
+            The response message dict, or None on timeout/error
+        """
+        if not self._process or not self._process.stdin:
+            return None
+        
+        request_id = request.get("id")
+        if not isinstance(request_id, int):
+            logger.error(f"Request missing valid integer id: {request}")
+            return None
+        
+        # Create future for response
+        future = asyncio.get_event_loop().create_future()
+        self._response_futures[request_id] = future
+        
+        try:
+            # Send the request
+            sent = await self._send_message(request)
+            if not sent:
+                return None
+            
+            # Wait for response
+            try:
+                response = await asyncio.wait_for(future, timeout=timeout)
+                return response
+            except asyncio.TimeoutError:
+                logger.error(f"Request {request_id} timed out after {timeout}s")
+                return None
+        finally:
+            # Clean up future if still pending
+            self._response_futures.pop(request_id, None)
     
     async def _read_loop(self):
         """Read messages from OpenCode stdout."""
@@ -434,7 +475,21 @@ class OpenCodeObserver:
         # Handle response to our initialize request
         if "id" in message and message.get("id") == 1 and "result" in message:
             logger.info("OpenCode ACP initialized successfully")
+            # Resolve any future waiting for initialize response
+            future = self._response_futures.pop(1, None)
+            if future and not future.done():
+                future.set_result(message)
             return
+        
+        # Check if this is a JSON-RPC response (has id and result/error)
+        if "id" in message and ("result" in message or "error" in message):
+            request_id = message.get("id")
+            if isinstance(request_id, int):
+                future = self._response_futures.pop(request_id, None)
+                if future and not future.done():
+                    future.set_result(message)
+            # Still parse as event for session tracking
+            # Don't return here - let it fall through to event parsing
         
         # Parse event
         event = self.parser.parse_message(message)

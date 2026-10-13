@@ -290,31 +290,25 @@ class OpenCodeAdapter(AgentAdapter):
                     cwd=cwd,
                     mcp_servers=[]
                 )
-                self.observer.parser.track_request(load_msg)
-                await self.observer._send_message(load_msg)
-                logger.info(f"Sent loadSession to verify identity for {session_id}")
+                # Use the observer's send_request for proper response correlation
+                response = await self.observer.send_request(load_msg, timeout=10.0)
                 
-                # Wait for response and verify success
-                try:
-                    response_line = await asyncio.wait_for(
-                        self.observer._process.stdout.readline(),
-                        timeout=10.0
-                    )
-                    if response_line:
-                        response = json.loads(response_line.strip())
-                        if "error" in response:
-                            logger.error(f"Session identity verification failed: {response['error']}")
-                            return False
-                        # Verify the returned session ID matches
-                        returned_session_id = response.get("result", {}).get("sessionId")
-                        if returned_session_id != session_id:
-                            logger.error(f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}")
-                            return False
-                        logger.info(f"Session identity verified after reconnect: {session_id}")
-                        return True
-                except asyncio.TimeoutError:
-                    logger.error("Session identity verification timeout")
+                if not response:
+                    logger.error("Session identity verification failed: no response")
                     return False
+                
+                if "error" in response:
+                    logger.error(f"Session identity verification failed: {response['error']}")
+                    return False
+                
+                # Verify the returned session ID matches
+                returned_session_id = response.get("result", {}).get("sessionId")
+                if returned_session_id != session_id:
+                    logger.error(f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}")
+                    return False
+                
+                logger.info(f"Session identity verified after reconnect: {session_id}")
+                return True
             except Exception as e:
                 logger.error(f"Failed to verify session identity after reconnect: {e}")
                 return False
@@ -346,26 +340,19 @@ class OpenCodeAdapter(AgentAdapter):
                 cwd=cwd,
                 mcp_servers=[]
             )
-            self.observer.parser.track_request(load_msg)
-            await self.observer._send_message(load_msg)
-            logger.info(f"Sent ACP loadSession for {turn_context.session_id}")
+            # Use the observer's send_request for proper response correlation
+            response = await self.observer.send_request(load_msg, timeout=10.0)
             
-            # Wait for response and verify success
-            try:
-                response_line = await asyncio.wait_for(
-                    self.observer._process.stdout.readline(),
-                    timeout=10.0
-                )
-                if response_line:
-                    response = json.loads(response_line.strip())
-                    if "error" in response:
-                        logger.error(f"Load session failed: {response['error']}")
-                        return False
-                    logger.info(f"Load session succeeded for {turn_context.session_id}")
-                    return True
-            except asyncio.TimeoutError:
-                logger.error("Load session response timeout")
+            if not response:
+                logger.error("Load session failed: no response")
                 return False
+            
+            if "error" in response:
+                logger.error(f"Load session failed: {response['error']}")
+                return False
+            
+            logger.info(f"Load session succeeded for {turn_context.session_id}")
+            return True
         except Exception as e:
             logger.error(f"Failed to load session via ACP: {e}")
             return False
@@ -393,34 +380,26 @@ class OpenCodeAdapter(AgentAdapter):
                 session_id=turn_context.session_id,
                 cwd=cwd
             )
-            self.observer.parser.track_request(fork_msg)
-            await self.observer._send_message(fork_msg)
-            logger.info(f"Sent ACP forkSession for {turn_context.session_id}")
+            # Use the observer's send_request for proper response correlation
+            response = await self.observer.send_request(fork_msg, timeout=10.0)
             
-            # Wait for response and verify success
-            try:
-                response_line = await asyncio.wait_for(
-                    self.observer._process.stdout.readline(),
-                    timeout=10.0
-                )
-                if response_line:
-                    response = json.loads(response_line.strip())
-                    if "error" in response:
-                        logger.error(f"Fork session failed: {response['error']}")
-                        return False
-                    new_session_id = response.get("result", {}).get("sessionId")
-                    if new_session_id:
-                        logger.info(f"Fork session succeeded, new session: {new_session_id}")
-                        context["new_session_id"] = new_session_id
-                        return True
-            except asyncio.TimeoutError:
-                logger.error("Fork session response timeout")
+            if not response:
+                logger.error("Fork session failed: no response")
                 return False
+            
+            if "error" in response:
+                logger.error(f"Fork session failed: {response['error']}")
+                return False
+            
+            new_session_id = response.get("result", {}).get("sessionId")
+            if new_session_id:
+                logger.info(f"Fork session succeeded, new session: {new_session_id}")
+                context["new_session_id"] = new_session_id
+                return True
+            return False
         except Exception as e:
             logger.error(f"Failed to fork session via ACP: {e}")
             return False
-        
-        return False
 
     async def _action_wait_for_backend(self, context: dict) -> bool:
         """Wait for backend to restart."""
@@ -503,26 +482,23 @@ class OpenCodeAdapter(AgentAdapter):
                                 cwd=cwd,
                                 mcp_servers=[]
                             )
-                            self.observer.parser.track_request(load_msg)
-                            await self.observer._send_message(load_msg)
+                            # Use the observer's send_request for proper response correlation
+                            response = await self.observer.send_request(load_msg, timeout=10.0)
                             
-                            response_line = await asyncio.wait_for(
-                                self.observer._process.stdout.readline(),
-                                timeout=10.0
-                            )
-                            if response_line:
-                                response = json.loads(response_line.strip())
-                                if "error" in response:
-                                    return False, {"error": f"Session identity verification failed: {response['error']}"}
-                                returned_session_id = response.get("result", {}).get("sessionId")
-                                if returned_session_id != session_id:
-                                    return False, {"error": f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}"}
-                                return True, {
-                                    "verified": "process_running_and_session_identity_verified",
-                                    "session_id": session_id
-                                }
-                        except asyncio.TimeoutError:
-                            return False, {"error": "Session identity verification timeout"}
+                            if not response:
+                                return False, {"error": "Session identity verification failed: no response"}
+                            
+                            if "error" in response:
+                                return False, {"error": f"Session identity verification failed: {response['error']}"}
+                            
+                            returned_session_id = response.get("result", {}).get("sessionId")
+                            if returned_session_id != session_id:
+                                return False, {"error": f"Session ID mismatch after reconnect: expected {session_id}, got {returned_session_id}"}
+                            
+                            return True, {
+                                "verified": "process_running_and_session_identity_verified",
+                                "session_id": session_id
+                            }
                         except Exception as e:
                             return False, {"error": f"Session identity verification failed: {e}"}
                     return False, {"error": "Process not running after reconnect"}
