@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0D0D0D"/>
+      <stop offset="100%" stop-color="#1A0A2E"/>
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7C3AED"/>
+      <stop offset="50%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="eyeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E0E7FF"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="12" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="innerGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feComposite in="blur" in2="SourceGraphic" operator="out"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="1280" height="640" fill="url(#bgGrad)"/>
+  
+  <!-- Subtle grid pattern -->
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(124, 58, 237, 0.05)" stroke-width="0.5"/>
+  </pattern>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  
+  <!-- Left side - logo and tagline -->
+  <g transform="translate(120, 160)">
+    <!-- Shield shape -->
+    <path d="M 160 0 
+             C 232 0 280 48 280 128 
+             C 280 224 208 288 160 336 
+             C 112 288 40 224 40 128 
+             C 40 48 88 0 160 0 Z" 
+          fill="url(#shieldGrad)" 
+          filter="url(#glow)"/>
+    
+    <!-- Eye/Iris -->
+    <circle cx="160" cy="128" r="45" fill="url(#eyeGrad)" filter="url(#innerGlow)"/>
+    
+    <!-- Pupil -->
+    <circle cx="160" cy="128" r="18" fill="#0D0D0D"/>
+    
+    <!-- Verification checkmark -->
+    <path d="M 148 132 L 157 142 L 178 120" 
+          fill="none" 
+          stroke="#A855F7" 
+          stroke-width="3.5" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+  </g>
+  
+  <!-- Right side - text -->
+  <g transform="translate(400, 200)">
+    <text x="0" y="0" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+          font-size="56" font-weight="700" fill="#FFFFFF" letter-spacing="-0.02em">
+      Agent Guardian
+    </text>
+    <text x="0" y="80" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+          font-size="28" font-weight="400" fill="#A855F7" letter-spacing="0.01em">
+      Safety-first reliability for AI coding agents
+    </text>
+    <text x="0" y="140" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+          font-size="20" font-weight="400" fill="#9CA3AF" letter-spacing="0.01em" style="max-width: 700px;">
+      Observe → Classify → Verify → Check Safety → Recover only when provably safe
+    </text>
+  </g>
+  
+  <!-- Bottom badges -->
+  <g transform="translate(400, 380)">
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="180" height="36" rx="18" fill="rgba(124, 58, 237, 0.2)" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="90" y="24" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#A855F7" text-anchor="middle">Apache-2.0</text>
+    </g>
+    <g transform="translate(200, 0)">
+      <rect x="0" y="0" width="180" height="36" rx="18" fill="rgba(124, 58, 237, 0.2)" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="90" y="24" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#A855F7" text-anchor="middle">Python 3.11+</text>
+    </g>
+    <g transform="translate(400, 0)">
+      <rect x="0" y="0" width="220" height="36" rx="18" fill="rgba(124, 58, 237, 0.2)" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="110" y="24" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#A855F7" text-anchor="middle">v0.1.0 · Alpha</text>
+    </g>
+  </g>
+  
+  <!-- Bottom line -->
+  <text x="640" y="580" font-family="system-ui, sans-serif" font-size="14" fill="#4B5563" text-anchor="middle">
+    Observe → Classify → Verify State → Check Safety → Recover only when provably safe
+  </text>
+</svg>

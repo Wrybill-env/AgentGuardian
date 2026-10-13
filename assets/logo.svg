@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0D0D0D"/>
+      <stop offset="100%" stop-color="#1A0A2E"/>
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7C3AED"/>
+      <stop offset="50%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="eyeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E0E7FF"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="innerGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feComposite in="blur" in2="SourceGraphic" operator="out"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="512" height="512" fill="url(#bgGrad)"/>
+  
+  <!-- Subtle grid pattern -->
+  <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+    <path d="M 32 0 L 0 0 0 32" fill="none" stroke="rgba(124, 58, 237, 0.06)" stroke-width="0.5"/>
+  </pattern>
+  <rect width="512" height="512" fill="url(#grid)"/>
+  
+  <!-- Shield shape -->
+  <path d="M 256 40 
+           C 370 40 450 100 450 200 
+           C 450 340 330 430 256 470 
+           C 182 430 62 340 62 200 
+           C 62 100 142 40 256 40 Z" 
+        fill="url(#shieldGrad)" 
+        filter="url(#glow)"/>
+  
+  <!-- Inner shield highlight -->
+  <path d="M 256 70 
+           C 330 70 390 120 390 200 
+           C 390 310 290 385 256 420 
+           C 222 385 122 310 122 200 
+           C 122 120 182 70 256 70 Z" 
+        fill="none" 
+        stroke="rgba(255,255,255,0.15)" 
+        stroke-width="2"/>
+  
+  <!-- Eye/Iris - represents observation -->
+  <circle cx="256" cy="200" r="70" fill="url(#eyeGrad)" filter="url(#innerGlow)"/>
+  
+  <!-- Pupil - represents verification/focus -->
+  <circle cx="256" cy="200" r="28" fill="#0D0D0D"/>
+  
+  <!-- Focus ring - represents the safety gate -->
+  <circle cx="256" cy="200" r="42" fill="none" stroke="#A855F7" stroke-width="2" stroke-dasharray="8,4" opacity="0.6"/>
+  
+  <!-- Outer verification ring -->
+  <circle cx="256" cy="200" r="95" fill="none" stroke="rgba(168, 85, 247, 0.3)" stroke-width="1.5"/>
+  
+  <!-- Verification checkmark in pupil -->
+  <path d="M 240 205 L 252 217 L 272 193" 
+        fill="none" 
+        stroke="#A855F7" 
+        stroke-width="5" 
+        stroke-linecap="round" 
+        stroke-linejoin="round"/>
+  
+  <!-- Four corner markers representing the four agents -->
+  <g fill="#A855F7" opacity="0.7">
+    <circle cx="80" cy="80" r="6"/>
+    <circle cx="432" cy="80" r="6"/>
+    <circle cx="80" cy="432" r="6"/>
+    <circle cx="432" cy="432" r="6"/>
+  </g>
+  
+  <!-- Small dots around shield representing monitoring -->
+  <g fill="#7C3AED" opacity="0.5">
+    <circle cx="256" cy="45" r="3"/>
+    <circle cx="256" cy="467" r="3"/>
+    <circle cx="45" cy="256" r="3"/>
+    <circle cx="467" cy="256" r="3"/>
+  </g>
+</svg>
