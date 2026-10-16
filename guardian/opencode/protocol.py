@@ -10,6 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 import json
+import os
 
 
 class OCPAEventType(Enum):
@@ -179,7 +180,9 @@ class OCPAProtocolParser:
                         "text": prompt
                     }
                 ],
-                "cwd": "C:/Projects/AgentGuardian"
+                # The session working directory; use the process CWD rather than
+                # a machine-specific absolute path.
+                "cwd": os.getcwd()
             }
         }
     

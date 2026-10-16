@@ -9,8 +9,10 @@ C. Guardian interpretation (state, counters, safety verdict)
 """
 
 import asyncio
+import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import pytest
@@ -181,15 +183,17 @@ class ForensicIntegrationTest:
         agent = None  # ForensicAgent is spawned as subprocess
 
         # Spawn the forensic agent subprocess
+        # Use the interpreter running the tests and this file's directory so the
+        # suite is portable (no machine-specific absolute paths).
         agent_cmd = [
-            'C:/Users/Mitansh Kulshreshtha/AppData/Local/hermes/hermes-agent/.hermes-runtime/python/cpython-3.11-windows-x86_64-none/python.exe',
+            sys.executable,
             '-m', 'forensic_agent_v2', str(self.tool_duration),
         ]
 
         async with acp.spawn_agent_process(
             lambda conn: self.client,
             *agent_cmd,
-            cwd='C:/Projects/AgentGuardian/tests/integration/forensic',
+            cwd=str(Path(__file__).resolve().parent),
         ) as (conn, process):
             result.session_id = f"exp_{int(time.time())}_{id(self)}"
 

@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import acp
@@ -274,7 +275,7 @@ async def run_forensic_experiments():
     import sys
     agent_cmd = [
         sys.executable,
-        "C:/Projects/AgentGuardian/tests/integration/forensic/forensic_agent.py",
+        str(Path(__file__).resolve().parent / "forensic_agent.py"),
         "3.0",  # 3 second tool duration
     ]
     
