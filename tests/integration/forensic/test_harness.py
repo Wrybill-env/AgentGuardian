@@ -10,14 +10,12 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import acp
+# Only the symbols actually used here are imported: the ACP SDK adds/removes
+# schema names between releases, and importing unused ones breaks collection on
+# newer versions (e.g. SessionModelState is absent from newer acp releases).
 from acp.schema import (
     InitializeRequest, NewSessionRequest, PromptRequest,
-    Implementation, ClientCapabilities, AgentCapabilities,
-    SessionCapabilities, SessionListCapabilities, PromptCapabilities,
-    McpCapabilities, SessionModeState, SessionModelState,
-    SessionForkCapabilities, SessionResumeCapabilities,
-    SessionCloseCapabilities,
-    ModelInfo,
+    Implementation, ClientCapabilities,
 )
 
 
