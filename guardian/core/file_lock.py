@@ -60,16 +60,20 @@ class FileLock:
         
             try:
                 if HAS_MSVCRT:
-                    # Windows: use msvcrt.locking (mandatory)
+                    # Windows: use msvcrt.locking (mandatory).
+                    # Attempt at least once even when timeout <= 0 so a
+                    # non-blocking single attempt is possible.
                     import time
                     start = time.time()
-                    while time.time() - start < self.timeout:
+                    while True:
                         try:
                             msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
                             self._acquired = True
                             return True
                         except OSError:
-                            time.sleep(0.1)
+                            if time.time() - start >= self.timeout:
+                                break
+                            time.sleep(0.05)
                     # Failed to acquire - close the file descriptor
                     if self._fd is not None:
                         os.close(self._fd)

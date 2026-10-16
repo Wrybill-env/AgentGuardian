@@ -16,8 +16,8 @@ from acp.schema import (
     SessionCapabilities, SessionListCapabilities, PromptCapabilities,
     McpCapabilities, SessionModeState, SessionModelState,
     SessionForkCapabilities, SessionResumeCapabilities,
-    SessionCloseCapabilities, SessionDeleteCapabilities,
-    ModelInfo, SessionId,
+    SessionCloseCapabilities,
+    ModelInfo,
 )
 
 

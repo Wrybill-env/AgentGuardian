@@ -2,17 +2,9 @@
 
 import random
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Optional, Dict, Any, Callable, List
 
-from .types import FailureType
-
-
-class LadderDelaySource(Enum):
-    """Source of a delay value."""
-    RETRY_AFTER = "retry_after"
-    JITTERED_SCHEDULE = "jittered_schedule"
-    MANUAL_OVERRIDE = "manual_override"
+from .types import FailureType, LadderDelaySource
 
 
 @dataclass
@@ -41,13 +33,13 @@ class LadderConfig:
     require_no_visible_output: bool = True
     require_no_tool_activity: bool = True
     eligible_failure_types: List[str] = field(default_factory=lambda: [
-        "TRANSIENT_NETWORK",
-        "RATE_LIMIT",
-        "PROVIDER_UNAVAILABLE",
-        "STALE_STREAM",
-        "CONNECTION_RESET",
-        "TIMEOUT",
-        "HTTP_5XX",
+        "network_transient",
+        "rate_limit",
+        "transient_provider",
+        "stream_stale",
+        "connection_reset",
+        "timeout",
+        "server_error",
     ])
     custom_eligibility_check: Optional[Callable[[], bool]] = None
 
@@ -261,13 +253,19 @@ AGGRESSIVE_LADDER = LadderConfig(
     max_cycles=5,
 )
 
+# The ladder has no "unlimited" convention: max_cycles is a hard cap and
+# `current_cycle >= max_cycles` makes a ladder ineligible. The previous value of
+# 0 therefore made this profile *never* eligible (0 >= 0), which contradicted its
+# name. A genuinely unbounded retry is unsafe, so this profile is bounded by a
+# large-but-finite cycle cap; the real hard stop is the RecoveryBudget
+# (max_total_recovery_time / max_total_attempts) enforced by the executor.
 INDEFINITE_LADDER = LadderConfig(
     cycle_delays=[10.0, 20.0, 30.0, 60.0, 60.0, 120.0, 120.0, 120.0],
     jitter_ratio=0.2,
     jitter_type="decorrelated",
     respect_retry_after=True,
     max_retry_after=300.0,
-    max_cycles=0,
+    max_cycles=100,
     require_no_visible_output=True,
     require_no_tool_activity=True,
 )

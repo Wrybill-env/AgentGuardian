@@ -162,6 +162,16 @@ class SafetyGate:
         - FORK_SESSION: Requires fork capability, safe point available
         - WAIT_FOR_BACKEND: Safe (no prompt replay)
         """
+        # Fail closed if we have no turn context to evaluate against.
+        # Without observed state we cannot prove absence of side effects.
+        if turn_context is None:
+            return SafetyCheckResult(
+                verdict=SafetyVerdict.AMBIGUOUS,
+                reason="No turn context available - cannot evaluate recovery safety",
+                details={"action": action.value if action else None},
+                blocking_factors=["Missing turn context"],
+            )
+
         # In OBSERVE_ONLY mode, NO recovery actions are allowed
         if self.safety_mode == SafetyMode.OBSERVE_ONLY:
             return SafetyCheckResult(
@@ -195,6 +205,12 @@ class SafetyGate:
                 RecoveryAction.RELOAD_SESSION,
                 RecoveryAction.FORK_SESSION,
                 RecoveryAction.RECONNECT_STREAM,
+                # Reconnect tears down and re-establishes the transport. It does
+                # not re-send the prompt, but it abandons observation of any
+                # in-flight turn, so it is treated like the other reconnect-class
+                # actions: it requires proven-fresh, corroborated state. A
+                # non-empty session id is NOT evidence of that.
+                RecoveryAction.RECONNECT_ACP,
             }
             if action in replay_actions and not turn_context.verified_fresh:
                 return SafetyCheckResult(
@@ -292,10 +308,36 @@ class SafetyGate:
             )
         
         elif action == RecoveryAction.WAIT_FOR_BACKEND:
-            # Safe - just waiting, no prompt replay
+            # Backend waiting is only safe when no side effect may have occurred.
+            # The shipped implementations poll the backend and then RECONNECT the
+            # transport, which abandons observation of any in-flight turn. If a
+            # tool may have executed we must not act automatically.
+            #
+            # NOTE: backend reachability is NOT proof that a session or turn
+            # recovered - it only proves the backend process is answering.
+            if turn_context.has_tool_activity() or turn_context.phase in (
+                TurnPhase.TOOL_EXECUTING,
+                TurnPhase.TOOL_COMPLETING,
+                TurnPhase.TURN_ENDING,
+                TurnPhase.TURN_COMPLETE,
+            ):
+                return SafetyCheckResult(
+                    verdict=SafetyVerdict.AMBIGUOUS,
+                    reason=(
+                        "Backend wait/reconnect would abandon a turn whose side effects "
+                        "are unknown - automatic action blocked, human decision required"
+                    ),
+                    details={
+                        "phase": turn_context.phase.value,
+                        "tool_calls_started": turn_context.tool_calls_started,
+                    },
+                    blocking_factors=[
+                        "Possible prior tool execution: backend wait cannot be proven safe"
+                    ],
+                )
             return SafetyCheckResult(
                 verdict=SafetyVerdict.SAFE,
-                reason="Waiting for backend restart - no prompt replay",
+                reason="Waiting for backend restart - no prompt replay and no observed side effects",
             )
         
         elif action == RecoveryAction.HUMAN_INTERVENTION:

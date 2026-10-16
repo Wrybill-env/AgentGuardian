@@ -23,6 +23,7 @@ from .types import (
 from .safety_gate import SafetyGate, SafetyCheckResult
 from .recovery_budget import RecoveryBudget, RecoveryBudgetManager, BudgetExhaustedReason, RecoveryBudgetConfig
 from .recovery_ladder import RecoveryLadder
+from .recovery_lease import RecoveryLease
 from .backoff import BackoffStrategy, BackoffConfig
 from .adapter_capabilities import AdapterCapability, AdapterCapabilities, AgentAdapter
 
@@ -52,6 +53,7 @@ class RecoveryExecutionContext:
     session_id: str
     turn_id: Optional[str] = None
     failure_type: Optional[FailureType] = None
+    failure_classification: Optional[FailureClassification] = None
     action: Optional[RecoveryAction] = None
     safety_verdict: SafetyVerdict = SafetyVerdict.AMBIGUOUS
     safety_reason: str = ""
@@ -112,12 +114,16 @@ class RecoveryExecutor:
         ladder: Optional["RecoveryLadder"] = None,
         backoff: Optional[BackoffStrategy] = None,
         default_mode: SafetyMode = SafetyMode.OBSERVE_ONLY,
+        recovery_lease: Optional[RecoveryLease] = None,
     ):
         self.safety_gate = safety_gate
         self.budget_manager = budget_manager
         self.ladder = ladder
         self.backoff = backoff
         self.default_mode = default_mode
+        # Optional cross-process exclusion. When set, at most one process may
+        # execute a recovery action for a given session at a time.
+        self.recovery_lease = recovery_lease
     
     async def execute_plan(
             self,
@@ -216,6 +222,7 @@ class RecoveryExecutor:
             session_id=plan.session_id,
             turn_id=plan.turn_id,
             failure_type=plan.failure_classification.failure_type if plan.failure_classification else None,
+            failure_classification=plan.failure_classification,
             action=plan.recommended_action,
             safety_verdict=plan.safety_verdict,
             safety_reason=plan.safety_reason,
@@ -399,11 +406,13 @@ class RecoveryExecutor:
 
                 # If state changed, re-evaluate safety
                 if state_changed:
-                    # Re-evaluate safety with current state
+                    # Re-evaluate safety with current state (defense in depth):
+                    # use the plan's failure classification so the execution-time
+                    # verdict is at least as strict as the planning-time verdict.
                     safety_result = self.safety_gate.check_recovery_action_safety(
                         action=ctx.action,
                         turn_context=current_session_state,
-                        failure_classification=None,  # We'll use the plan's classification
+                        failure_classification=ctx.failure_classification,
                         session_state=current_stream_state,
                     )
 
@@ -672,6 +681,42 @@ class RecoveryExecutor:
         current_session_state: TurnContext,
         current_stream_state: Optional[Dict[str, Any]] = None,
     ) -> RecoveryExecutionResult:
+        """
+        Execute the recovery action, protected by an optional cross-process
+        recovery lease.
+
+        If a lease is configured and another Guardian process currently holds it
+        for this session, execution is denied (fail closed) without touching the
+        adapter. The lease is released on every exit path.
+        """
+        if self.recovery_lease is None:
+            return await self._execute_action_locked(
+                ctx, adapter, current_session_state, current_stream_state
+            )
+
+        lease = self.recovery_lease.try_acquire(ctx.session_id)
+        if lease is None:
+            return RecoveryExecutionResult(
+                result=ExecutionResult.BLOCKED,
+                action=ctx.action,
+                success=False,
+                message="Recovery lease held by another process - refusing concurrent recovery",
+                details={"lease": "held", "session_id": ctx.session_id},
+            )
+        try:
+            return await self._execute_action_locked(
+                ctx, adapter, current_session_state, current_stream_state
+            )
+        finally:
+            self.recovery_lease.release(lease)
+
+    async def _execute_action_locked(
+        self,
+        ctx: RecoveryExecutionContext,
+        adapter: AgentAdapter,
+        current_session_state: TurnContext,
+        current_stream_state: Optional[Dict[str, Any]] = None,
+    ) -> RecoveryExecutionResult:
         """Execute the recovery action via adapter with final safety authorization."""
         
         # Record budget attempt BEFORE execution
@@ -819,10 +864,20 @@ class RecoveryExecutor:
     ) -> RecoveryExecutionResult:
         """Verify the execution result by observing new state."""
         
-        # Preserve revalidation failures - they are not execution failures
-        if execution_result.result == ExecutionResult.REVALIDATION_FAILED:
+        # Preserve results that represent a deliberate refusal or a stale-plan
+        # abort: these are safety outcomes, NOT execution failures, and must not
+        # be rewritten as EXECUTION_FAILED (which would misreport "nothing was
+        # attempted" as "the action failed").
+        if execution_result.result in (
+            ExecutionResult.REVALIDATION_FAILED,
+            ExecutionResult.BLOCKED,
+            ExecutionResult.SAFETY_BLOCKED,
+            ExecutionResult.ABORTED,
+            ExecutionResult.CAPABILITY_UNAVAILABLE,
+            ExecutionResult.BUDGET_EXHAUSTED,
+        ):
             return execution_result
-        
+
         if not execution_result.success or not execution_result.adapter_result:
             return RecoveryExecutionResult(
                 result=ExecutionResult.EXECUTION_FAILED,

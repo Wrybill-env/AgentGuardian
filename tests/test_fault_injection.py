@@ -913,37 +913,51 @@ async def test_recovery_blocked_after_tool_execution():
 
 @pytest.mark.asyncio
 async def test_reconnect_acp_requires_session_id():
-    """Verify reconnect requires session ID for safety."""
+    """Reconnect requires proven freshness - a session id is NOT sufficient."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
-    
+
     # No session ID - ambiguous
     turn_context = TurnContext(session_id="")
     result = gate.check_recovery_action_safety(
         RecoveryAction.RECONNECT_ACP, turn_context
     )
     assert result.verdict == SafetyVerdict.AMBIGUOUS
-    
-    # With session ID - safe
+
+    # Session ID alone is not evidence of freshness -> still blocked
     turn_context = TurnContext(session_id="sess_123")
     result = gate.check_recovery_action_safety(
         RecoveryAction.RECONNECT_ACP, turn_context
+    )
+    assert result.verdict == SafetyVerdict.AMBIGUOUS
+
+    # Corroborated freshness permits the reconnect branch
+    fresh = TurnContext(session_id="sess_123", verified_fresh=True)
+    result = gate.check_recovery_action_safety(
+        RecoveryAction.RECONNECT_ACP, fresh
     )
     assert result.verdict == SafetyVerdict.SAFE
 
 
 @pytest.mark.asyncio
 async def test_wait_for_backend_always_safe():
-    """Verify WAIT_FOR_BACKEND is always safe (no replay)."""
+    """WAIT_FOR_BACKEND is NOT unconditionally safe (handler reconnects)."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
-    
+
     turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.assistant_chunks_received = 10
     turn_context.tool_calls_started = 5
-    
+
     result = gate.check_recovery_action_safety(
         RecoveryAction.WAIT_FOR_BACKEND, turn_context
     )
-    
+
+    assert result.verdict != SafetyVerdict.SAFE
+
+    # Safe only when no side effect may have occurred
+    clean = TurnContext(session_id="sess_test", verified_fresh=True)
+    result = gate.check_recovery_action_safety(
+        RecoveryAction.WAIT_FOR_BACKEND, clean
+    )
     assert result.verdict == SafetyVerdict.SAFE
 
 
@@ -970,37 +984,51 @@ async def test_recovery_blocked_after_tool_execution():
 
 @pytest.mark.asyncio
 async def test_reconnect_acp_requires_session_id():
-    """Verify reconnect requires session ID for safety."""
+    """Reconnect requires proven freshness - a session id is NOT sufficient."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
-    
+
     # No session ID - ambiguous
     turn_context = TurnContext(session_id="")
     result = gate.check_recovery_action_safety(
         RecoveryAction.RECONNECT_ACP, turn_context
     )
     assert result.verdict == SafetyVerdict.AMBIGUOUS
-    
-    # With session ID - safe
+
+    # Session ID alone is not evidence of freshness -> still blocked
     turn_context = TurnContext(session_id="sess_123")
     result = gate.check_recovery_action_safety(
         RecoveryAction.RECONNECT_ACP, turn_context
+    )
+    assert result.verdict == SafetyVerdict.AMBIGUOUS
+
+    # Corroborated freshness permits the reconnect branch
+    fresh = TurnContext(session_id="sess_123", verified_fresh=True)
+    result = gate.check_recovery_action_safety(
+        RecoveryAction.RECONNECT_ACP, fresh
     )
     assert result.verdict == SafetyVerdict.SAFE
 
 
 @pytest.mark.asyncio
 async def test_wait_for_backend_always_safe():
-    """Verify WAIT_FOR_BACKEND is always safe (no replay)."""
+    """WAIT_FOR_BACKEND is NOT unconditionally safe (handler reconnects)."""
     gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
-    
+
     turn_context = TurnContext(session_id="sess_test", verified_fresh=True)
     turn_context.assistant_chunks_received = 10
     turn_context.tool_calls_started = 5
-    
+
     result = gate.check_recovery_action_safety(
         RecoveryAction.WAIT_FOR_BACKEND, turn_context
     )
-    
+
+    assert result.verdict != SafetyVerdict.SAFE
+
+    # Safe only when no side effect may have occurred
+    clean = TurnContext(session_id="sess_test", verified_fresh=True)
+    result = gate.check_recovery_action_safety(
+        RecoveryAction.WAIT_FOR_BACKEND, clean
+    )
     assert result.verdict == SafetyVerdict.SAFE
 
 

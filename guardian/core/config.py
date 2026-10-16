@@ -56,10 +56,32 @@ class GuardianConfig:
     # State persistence
     persist_state: bool = False
     state_file: str = "~/.guardian/state.json"
-    
+
+    # Cross-process recovery exclusion. Default-on because it only ever
+    # *restricts* recovery: an unusable lease directory denies recovery.
+    recovery_lease_enabled: bool = True
+    recovery_lease_dir: Optional[str] = None  # derived from state_file when None
+
     # Goose-specific
     goose_token: Optional[str] = None
     goose_port: Optional[int] = None
+
+    def resolved_lease_dir(self) -> str:
+        """Directory holding per-session recovery lease files."""
+        if self.recovery_lease_dir:
+            return str(Path(self.recovery_lease_dir).expanduser())
+        return str(Path(self.state_file).expanduser().parent / "leases")
+
+    def build_recovery_lease(self):
+        """
+        Build the cross-process recovery lease for automatic recovery, or None
+        when disabled. A lease that cannot be created/acquired denies recovery
+        (fail closed), so enabling it can only make recovery stricter.
+        """
+        if not self.recovery_lease_enabled:
+            return None
+        from .recovery_lease import RecoveryLease
+        return RecoveryLease(self.resolved_lease_dir())
     
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "GuardianConfig":
@@ -112,6 +134,8 @@ class GuardianConfig:
             "GUARDIAN_GOOSE_TOKEN": ("goose_token", str),
             "GUARDIAN_GOOSE_PORT": ("goose_port", int),
             "GUARDIAN_USE_TLS": ("use_tls", lambda v: v.lower() == "true"),
+            "GUARDIAN_RECOVERY_LEASE": ("recovery_lease_enabled", lambda v: v.lower() == "true"),
+            "GUARDIAN_RECOVERY_LEASE_DIR": ("recovery_lease_dir", str),
             "GUARDIAN_BACKOFF_INITIAL": ("backoff.initial_delay", float),
             "GUARDIAN_BACKOFF_MAX": ("backoff.max_delay", float),
             "GUARDIAN_BACKOFF_MULTIPLIER": ("backoff.multiplier", float),

@@ -50,6 +50,10 @@ class HermesSafetyReason(Enum):
     AMBIGUOUS_STREAM_STATE_UNKNOWN = "ambiguous_stream_state_unknown"
     AMBIGUOUS_PARTIAL_OBSERVATION = "ambiguous_partial_observation"
     BLOCKED_OBSERVE_ONLY = "blocked_observe_only_mode"
+    # The Hermes gate can never be more permissive than the core gate. When the
+    # core gate is stricter, its verdict is reported with these reasons.
+    UNSAFE_CORE_GATE = "unsafe_core_gate"
+    AMBIGUOUS_CORE_GATE = "ambiguous_core_gate"
 
 
 @dataclass
@@ -212,15 +216,75 @@ class HermesSafetyGate:
         stream_state: Optional[Dict[str, Any]] = None,
     ) -> HermesSafetyCheckResult:
         """
-        Check if a specific recovery action is safe.
+        Action-level safety check, hardened against policy divergence.
+
+        A gateway must have exactly ONE safety policy. This method evaluates the
+        Hermes-specific rules and the core rules and returns the MORE
+        restrictive verdict, so the Hermes gate can never authorise something
+        the core gate denies (previously this gate had no freshness check and
+        would allow prompt replay that the core gate blocks).
+        """
+        hermes = self._check_recovery_action_safety_hermes(
+            action, turn_context, failure_classification, stream_state
+        )
+        core = self._core_gate.check_recovery_action_safety(
+            action=action,
+            turn_context=turn_context,
+            failure_classification=failure_classification,
+        )
+        return self._most_restrictive(hermes, core)
+
+    _SEVERITY = {
+        HermesSafetyVerdict.SAFE: 0,
+        HermesSafetyVerdict.AMBIGUOUS: 1,
+        HermesSafetyVerdict.UNSAFE: 2,
+    }
+
+    def _most_restrictive(
+        self,
+        hermes: HermesSafetyCheckResult,
+        core: SafetyCheckResult,
+    ) -> HermesSafetyCheckResult:
+        """Return whichever verdict is stricter; Hermes reasons win on ties."""
+        core_verdict = {
+            SafetyVerdict.SAFE: HermesSafetyVerdict.SAFE,
+            SafetyVerdict.AMBIGUOUS: HermesSafetyVerdict.AMBIGUOUS,
+            SafetyVerdict.UNSAFE: HermesSafetyVerdict.UNSAFE,
+        }[core.verdict]
+
+        if self._SEVERITY[core_verdict] <= self._SEVERITY[hermes.verdict]:
+            return hermes
+
+        reason = (
+            HermesSafetyReason.UNSAFE_CORE_GATE
+            if core_verdict is HermesSafetyVerdict.UNSAFE
+            else HermesSafetyReason.AMBIGUOUS_CORE_GATE
+        )
+        return HermesSafetyCheckResult(
+            verdict=core_verdict,
+            reason=reason,
+            message=core.reason,
+            details={**(core.details or {}), "core_gate": True, "hermes_gate": False},
+            blocking_factors=list(core.blocking_factors),
+        )
+
+    def _check_recovery_action_safety_hermes(
+        self,
+        action: RecoveryAction,
+        turn_context: TurnContext,
+        failure_classification: Optional[Any] = None,
+        stream_state: Optional[Dict[str, Any]] = None,
+    ) -> HermesSafetyCheckResult:
+        """
+        Hermes-specific action safety rules.
         
         Different actions have different safety requirements:
         - WAIT_AND_RETRY: Requires no side effects observed
         - CANCEL_AND_REPLAY: Requires no side effects, plus ability to cancel
-        - RECONNECT_ACP: Generally safe (no prompt replay)
+        - RECONNECT_ACP: Requires proven-fresh, corroborated state (see wrapper)
         - RELOAD_SESSION: Requires session identity preserved
         - FORK_SESSION: Requires fork capability, safe point available
-        - WAIT_FOR_BACKEND: Safe (no prompt replay)
+        - WAIT_FOR_BACKEND: Requires no possible prior tool execution
         """
         # In OBSERVE_ONLY mode, NO recovery actions are allowed
         if self.safety_mode == SafetyMode.OBSERVE_ONLY:

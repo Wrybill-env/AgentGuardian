@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Optional
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Dict, Any, List
 
 
 class GuardianState(Enum):
@@ -232,8 +233,289 @@ class AdapterCapability(Enum):
 
 
 @dataclass
+class FailureEvidence:
+    """Evidence supporting a failure classification."""
+    # Source signals
+    error_message: Optional[str] = None
+    http_status: Optional[int] = None
+    stop_reason: Optional[str] = None
+    exception_type: Optional[str] = None
+
+    # Stream state at failure
+    stream_phase: Optional[str] = None
+    chunks_received: int = 0
+    visible_output: bool = False
+    reasoning_only: bool = False
+
+    # Tool state at failure
+    tools_started: List[str] = field(default_factory=list)
+    tools_completed: List[str] = field(default_factory=list)
+    tools_failed: List[str] = field(default_factory=list)
+    partial_tool_names: List[str] = field(default_factory=list)
+    tool_active: bool = False
+
+    # Timing
+    time_since_last_event: Optional[float] = None
+    time_since_first_chunk: Optional[float] = None
+    time_since_last_chunk: Optional[float] = None
+    time_since_tool_start: Optional[float] = None
+
+    # Turn context
+    turn_phase: Optional[str] = None
+    turn_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+    # Additional context
+    retry_count: int = 0
+    auto_recovery_cycles: int = 0
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+@dataclass
+class RecoveryHint:
+    """Recovery hints derived from failure classification."""
+    retryable: bool = False
+    recommended_actions: List[str] = field(default_factory=list)  # RecoveryAction values
+    requires_human: bool = True
+    max_recovery_cycles: int = 3
+    base_backoff_seconds: float = 1.0
+    max_backoff_seconds: float = 60.0
+    respect_retry_after: bool = True
+    max_retry_after_seconds: float = 120.0
+    provider_fallback_possible: bool = False
+    session_reattach_possible: bool = False
+    stream_reconnect_possible: bool = False
+
+
+# Mapping from FailureType to FailureCategory
+FAILURE_TYPE_TO_CATEGORY = {
+    FailureType.RATE_LIMIT: FailureCategory.TRANSIENT_PROVIDER,
+    FailureType.TRANSIENT_PROVIDER: FailureCategory.TRANSIENT_PROVIDER,
+    FailureType.OVERLOADED: FailureCategory.TRANSIENT_PROVIDER,
+    FailureType.SERVER_ERROR: FailureCategory.SERVER_ERROR,
+    FailureType.NETWORK_TRANSIENT: FailureCategory.NETWORK,
+    FailureType.CONNECTION_RESET: FailureCategory.NETWORK,
+    FailureType.DNS_FAILURE: FailureCategory.NETWORK,
+    FailureType.TIMEOUT: FailureCategory.NETWORK,
+    FailureType.STREAM_STALE: FailureCategory.STREAM,
+    FailureType.STREAM_TRUNCATED: FailureCategory.STREAM,
+    FailureType.FIRST_CHUNK_TIMEOUT: FailureCategory.STREAM,
+    FailureType.CHUNK_GAP: FailureCategory.STREAM,
+    FailureType.BACKEND_DISCONNECT: FailureCategory.BACKEND,
+    FailureType.BACKEND_CRASH: FailureCategory.BACKEND,
+    FailureType.BACKEND_RESTART: FailureCategory.BACKEND,
+    FailureType.AUTHENTICATION_FAILURE: FailureCategory.AUTH_CONFIG,
+    FailureType.INVALID_CONFIGURATION: FailureCategory.AUTH_CONFIG,
+    FailureType.INVALID_MODEL: FailureCategory.AUTH_CONFIG,
+    FailureType.TOOL_FAILURE: FailureCategory.TOOL,
+    FailureType.TOOL_TIMEOUT: FailureCategory.TOOL,
+    FailureType.PERMISSION_FAILURE: FailureCategory.PERMISSION,
+    FailureType.CONTENT_POLICY_BLOCKED: FailureCategory.PERMISSION,
+    FailureType.USER_CANCELLED: FailureCategory.USER,
+    FailureType.UNKNOWN_FAILURE: FailureCategory.UNKNOWN,
+}
+
+
+# Default recovery hints per failure type
+DEFAULT_RECOVERY_HINTS: Dict[FailureType, RecoveryHint] = {
+    FailureType.RATE_LIMIT: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_and_retry", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=5,
+        base_backoff_seconds=5.0,
+        max_backoff_seconds=120.0,
+        respect_retry_after=True,
+        max_retry_after_seconds=120.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.TRANSIENT_PROVIDER: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_and_retry", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=5,
+        base_backoff_seconds=5.0,
+        max_backoff_seconds=120.0,
+        respect_retry_after=True,
+        max_retry_after_seconds=120.0,
+        stream_reconnect_possible=True,
+        provider_fallback_possible=True,
+    ),
+    FailureType.OVERLOADED: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_and_retry", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=5,
+        base_backoff_seconds=15.0,
+        max_backoff_seconds=60.0,
+        respect_retry_after=True,
+        max_retry_after_seconds=120.0,
+        stream_reconnect_possible=True,
+        provider_fallback_possible=True,
+    ),
+    FailureType.SERVER_ERROR: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_and_retry", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=2.0,
+        max_backoff_seconds=60.0,
+        respect_retry_after=True,
+        max_retry_after_seconds=120.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.NETWORK_TRANSIENT: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_and_retry", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=1.0,
+        max_backoff_seconds=30.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.CONNECTION_RESET: RecoveryHint(
+        retryable=True,
+        recommended_actions=["reconnect_stream", "wait_and_retry"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=1.0,
+        max_backoff_seconds=30.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.DNS_FAILURE: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_and_retry"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=2.0,
+        max_backoff_seconds=60.0,
+    ),
+    FailureType.TIMEOUT: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_and_retry", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=2.0,
+        max_backoff_seconds=60.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.STREAM_STALE: RecoveryHint(
+        retryable=True,
+        recommended_actions=["cancel_and_replay", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=5.0,
+        max_backoff_seconds=60.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.STREAM_TRUNCATED: RecoveryHint(
+        retryable=True,
+        recommended_actions=["cancel_and_replay", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=2.0,
+        max_backoff_seconds=60.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.FIRST_CHUNK_TIMEOUT: RecoveryHint(
+        retryable=True,
+        recommended_actions=["cancel_and_replay", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=5.0,
+        max_backoff_seconds=60.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.CHUNK_GAP: RecoveryHint(
+        retryable=True,
+        recommended_actions=["cancel_and_replay", "reconnect_stream"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=5.0,
+        max_backoff_seconds=60.0,
+        stream_reconnect_possible=True,
+    ),
+    FailureType.BACKEND_DISCONNECT: RecoveryHint(
+        retryable=True,
+        recommended_actions=["reconnect_stream", "reattach_session", "wait_for_backend"],
+        requires_human=False,
+        max_recovery_cycles=5,
+        base_backoff_seconds=5.0,
+        max_backoff_seconds=120.0,
+        stream_reconnect_possible=True,
+        session_reattach_possible=True,
+    ),
+    FailureType.BACKEND_CRASH: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_for_backend", "reattach_session"],
+        requires_human=False,
+        max_recovery_cycles=5,
+        base_backoff_seconds=10.0,
+        max_backoff_seconds=300.0,
+        session_reattach_possible=True,
+    ),
+    FailureType.BACKEND_RESTART: RecoveryHint(
+        retryable=True,
+        recommended_actions=["wait_for_backend", "reattach_session"],
+        requires_human=False,
+        max_recovery_cycles=3,
+        base_backoff_seconds=5.0,
+        max_backoff_seconds=60.0,
+        session_reattach_possible=True,
+    ),
+    FailureType.AUTHENTICATION_FAILURE: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+    FailureType.INVALID_CONFIGURATION: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+    FailureType.INVALID_MODEL: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention", "switch_provider"],
+        requires_human=True,
+        provider_fallback_possible=True,
+    ),
+    FailureType.TOOL_FAILURE: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+    FailureType.TOOL_TIMEOUT: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+    FailureType.PERMISSION_FAILURE: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+    FailureType.CONTENT_POLICY_BLOCKED: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+    FailureType.USER_CANCELLED: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+    FailureType.UNKNOWN_FAILURE: RecoveryHint(
+        retryable=False,
+        recommended_actions=["human_intervention"],
+        requires_human=True,
+    ),
+}
+
+
+@dataclass
 class FailureClassification:
-    """Result of failure classification."""
+    """Result of failure classification with recovery hints."""
     failure_type: FailureType
     retryable: bool
     replay_safe: bool
@@ -242,6 +524,23 @@ class FailureClassification:
     confidence: float  # 0.0 - 1.0
     details: dict = field(default_factory=dict)
     raw_error: Optional[str] = None
+    # Extended fields for recovery planner compatibility
+    category: FailureCategory = FailureCategory.UNKNOWN
+    recovery_hints: Optional['RecoveryHint'] = None
+    evidence: Optional['FailureEvidence'] = None
+    matched_patterns: list = field(default_factory=list)
+    timestamp: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
+        if self.recovery_hints is None:
+            # Provide a minimal default recovery hint
+            self.recovery_hints = DEFAULT_RECOVERY_HINTS.get(self.failure_type, DEFAULT_RECOVERY_HINTS[FailureType.UNKNOWN_FAILURE])
+        if self.evidence is None:
+            self.evidence = FailureEvidence()
+        if self.category == FailureCategory.UNKNOWN and self.failure_type != FailureType.UNKNOWN_FAILURE:
+            self.category = FAILURE_TYPE_TO_CATEGORY.get(self.failure_type, FailureCategory.UNKNOWN)
 
 
 @dataclass
@@ -266,7 +565,18 @@ class TurnContext:
     # Verified fresh flag - True only if prior execution state has been verified
     # (e.g., via persistence). Defaults to False; without persistence, we cannot
     # verify no restart occurred, so we must treat state as potentially ambiguous.
+    #
+    # CONTRACT: the ONLY legitimate writer is persistence-backed reconstruction
+    # (guardian.core.persistence.create_turn_context_from_session), which sets it
+    # True only when validated persisted state was loaded for this session.
+    # Agent adapters MUST NOT set this flag: a live session cannot prove that no
+    # restart/reattach gap occurred, and adapter self-assertion of freshness is
+    # not independent evidence. Replay actions (WAIT_AND_RETRY /
+    # CANCEL_AND_REPLAY) are denied by the safety gate unless this is True.
     verified_fresh: bool = False
+    # Evaluated freshness evidence backing verified_fresh (diagnostics/provenance).
+    # Populated by guardian.core.freshness.apply_freshness. Never set by adapters.
+    freshness_evidence: Optional[Any] = None
     # Deduplication tracking
     _seen_tool_call_ids: set = field(default_factory=set)
     _completed_tool_call_ids: set = field(default_factory=set)

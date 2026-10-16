@@ -376,10 +376,17 @@ def create_turn_context_from_session(
     user_prompt: Optional[str] = None,
 ) -> "TurnContext":
     """
-    Create a TurnContext from session, with verified_fresh set based on
-    whether we successfully loaded persisted state.
+    Create a TurnContext from session state.
+
+    NOTE (safety): ``verified_fresh`` is NOT set from persisted state. A persisted
+    snapshot proves only that some state existed when it was written; it does not
+    prove the agent is still at that state, that no tool has executed since, or
+    that session identity is unchanged. Persisted state alone therefore evaluates
+    to HISTORICAL_ONLY and replay stays blocked until an adapter independently
+    corroborates live continuity (see guardian.core.freshness).
     """
     from .types import TurnContext, TurnPhase
+    from .freshness import evaluate_freshness, apply_freshness
 
     # Start or continue turn
     if session.current_turn:
@@ -387,8 +394,15 @@ def create_turn_context_from_session(
     else:
         turn = session.start_turn(run_id=run_id or "", user_prompt=user_prompt or "")
 
-    # verified_fresh is True ONLY if we successfully loaded and validated persisted state
-    verified_fresh = loaded_state is not None
+    # Persisted state is NOT fresh state. Evaluate the evidence honestly: with
+    # only a snapshot and no live corroboration this yields HISTORICAL_ONLY,
+    # which never authorizes replay.
+    freshness = evaluate_freshness(
+        live_session_id=session.session_id,
+        observed=None,
+        persisted=loaded_state,
+        report=None,
+    )
 
     # Determine source for tool activity counts
     # Priority: current_turn (if it has data) > last turn in history
@@ -426,7 +440,6 @@ def create_turn_context_from_session(
         stop_reason=evidence.stop_reason,
         error_message=evidence.error_message,
         state_generation=state_gen,
-        verified_fresh=verified_fresh,
     )
 
     # Restore deduplication sets from persisted evidence
@@ -435,5 +448,9 @@ def create_turn_context_from_session(
         ctx._completed_tool_call_ids = source_turn.evidence.get_completed_tool_call_ids()
         ctx._failed_tool_call_ids = source_turn.evidence.get_failed_tool_call_ids()
         ctx.state_generation = source_turn.state_generation
+
+    # Apply the honesty-checked freshness verdict (verified_fresh stays False
+    # unless an adapter independently corroborated live continuity).
+    apply_freshness(ctx, freshness)
 
     return ctx

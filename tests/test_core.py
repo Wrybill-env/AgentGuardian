@@ -441,21 +441,31 @@ class TestSafetyGate:
     def test_reconnect_acp_safety(self):
         gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
 
-        # Safe with session ID
+        # A valid session id is NOT sufficient: reconnect is in the freshness
+        # set, and nothing can prove corroborated freshness today, so it is
+        # blocked (fail closed).
         turn_context = TurnContext(session_id="sess_test")
         result = gate.check_recovery_action_safety(
             RecoveryAction.RECONNECT_ACP,
             turn_context,
         )
-        assert result.verdict == SafetyVerdict.SAFE
+        assert result.verdict == SafetyVerdict.AMBIGUOUS
 
-        # Ambiguous without session ID
+        # Ambiguous without session ID as well
         turn_context = TurnContext(session_id="")
         result = gate.check_recovery_action_safety(
             RecoveryAction.RECONNECT_ACP,
             turn_context,
         )
         assert result.verdict == SafetyVerdict.AMBIGUOUS
+
+        # Only corroborated freshness permits the reconnect branch itself
+        fresh = TurnContext(session_id="sess_test", verified_fresh=True)
+        result = gate.check_recovery_action_safety(
+            RecoveryAction.RECONNECT_ACP,
+            fresh,
+        )
+        assert result.verdict == SafetyVerdict.SAFE
 
     def test_reload_session_safety(self):
         gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
@@ -517,8 +527,11 @@ class TestSafetyGate:
         )
         assert result.verdict == SafetyVerdict.AMBIGUOUS
 
-    def test_wait_for_backend_always_safe(self):
+    def test_wait_for_backend_requires_no_possible_tool_execution(self):
         gate = SafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
+
+        # The shipped handler reconnects the transport, abandoning an in-flight
+        # turn - so it must not be treated as unconditionally safe.
         turn_context = TurnContext(session_id="sess_test")
         turn_context.assistant_chunks_received = 10
         turn_context.tool_calls_started = 5
@@ -526,6 +539,14 @@ class TestSafetyGate:
         result = gate.check_recovery_action_safety(
             RecoveryAction.WAIT_FOR_BACKEND,
             turn_context,
+        )
+        assert result.verdict != SafetyVerdict.SAFE
+
+        # Safe when no side effect may have occurred
+        clean = TurnContext(session_id="sess_test")
+        result = gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_FOR_BACKEND,
+            clean,
         )
         assert result.verdict == SafetyVerdict.SAFE
 
@@ -973,7 +994,14 @@ class TestPersistence:
         assert history_turn.user_prompt == "test prompt"
 
     def test_verified_fresh_on_load(self):
-        """Test that loaded state produces verified_fresh=True."""
+        """
+        Persisted state alone must NOT grant replay freshness.
+
+        A snapshot proves only that some state existed when it was written; it
+        cannot prove the agent is still at that state or that no tool ran since.
+        Replay therefore stays blocked until an adapter independently corroborates
+        live continuity (see guardian.core.freshness).
+        """
         from guardian.core.session_state import create_session
 
         persister = StatePersister(self.storage_path)
@@ -986,9 +1014,12 @@ class TestPersistence:
         # Load and create turn context
         loaded = persister.load("test_session")
         new_session, loaded_state = create_persisted_session("test_session", "test_agent", self.storage_path)
+        assert loaded_state is not None
         ctx = create_turn_context_from_session(new_session, loaded_state)
 
-        assert ctx.verified_fresh is True
+        assert ctx.verified_fresh is False
+        assert ctx.freshness_evidence is not None
+        assert ctx.freshness_evidence.status.value == "historical_only"
         assert ctx.session_id == "test_session"
 
     def test_verified_fresh_false_without_persisted_state(self):

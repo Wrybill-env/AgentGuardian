@@ -520,6 +520,38 @@ class GuardianCLI:
         
         return 0
 
+    def _load_config(self, args: argparse.Namespace) -> "GuardianConfig":
+        """Load GuardianConfig from --config when given, else the default path."""
+        cfg_arg = getattr(args, "config", None)
+        path = Path(cfg_arg).expanduser() if cfg_arg else None
+        try:
+            return GuardianConfig.load(path)
+        except Exception as e:
+            logger.warning(f"Failed to load config ({e}); using defaults")
+            return GuardianConfig()
+
+    def _build_guardian(self, args: argparse.Namespace, adapter) -> GuardianStateMachine:
+        """
+        Construct the state machine for watch mode, wiring cross-process
+        recovery exclusion from configuration (default-on).
+        """
+        config = self._load_config(args)
+        lease = config.build_recovery_lease()
+        if lease is not None:
+            print(f"[Guardian] Recovery lease: {lease.lease_dir}")
+        else:
+            print("[Guardian] Recovery lease: DISABLED (recovery_lease_enabled=false)")
+        return GuardianStateMachine(
+            safety_mode=SafetyMode(args.safety_mode),
+            stale_threshold=args.stale_threshold,
+            on_state_change=self._on_state_change,
+            on_failure=self._on_failure,
+            on_recovery_action=self._on_recovery_action,
+            on_recovery_result=self._on_recovery_result,
+            adapter=adapter,
+            recovery_lease=lease,
+        )
+
     async def run_watch(self, args: argparse.Namespace) -> int:
             """Run the watch command with full state machine."""
             connection_info = await self._get_connection_info(args)
@@ -540,16 +572,8 @@ class GuardianCLI:
                 guardian=None,  # Will be set after guardian creation
             )
 
-            # Create guardian state machine with the adapter
-            self.guardian = GuardianStateMachine(
-                safety_mode=SafetyMode(args.safety_mode),
-                stale_threshold=args.stale_threshold,
-                on_state_change=self._on_state_change,
-                on_failure=self._on_failure,
-                on_recovery_action=self._on_recovery_action,
-                on_recovery_result=self._on_recovery_result,
-                adapter=self.adapter,
-            )
+            # Create guardian state machine with the adapter (lease wired from config)
+            self.guardian = self._build_guardian(args, self.adapter)
 
             # Set the guardian reference on the adapter
             self.adapter.guardian = self.guardian

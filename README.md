@@ -9,12 +9,15 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Wrybill-env/AgentGuardian/actions"><img src="https://img.shields.io/github/actions/workflow/status/Wrybill-env/AgentGuardian/ci.yml?branch=main&logo=github&label=CI" alt="CI Status"/></a>
-  <a href="https://pypi.org/project/agent-guardian/"><img src="https://img.shields.io/pypi/v/agent-guardian?label=PyPI" alt="PyPI Version"/></a>
-  <a href="https://github.com/Wrybill-env/AgentGuardian/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Wrybill-env/AgentGuardian" alt="License"/></a>
-  <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"/></a>
-  <a href="https://github.com/Wrybill-env/AgentGuardian/releases"><img src="https://img.shields.io/github/v/release/Wrybill-env/AgentGuardian?include_prereleases&label=release" alt="Release"/></a>
+  <a href="https://github.com/Wrybill-env/AgentGuardian/actions/workflows/tests.yml"><img src="https://github.com/Wrybill-env/AgentGuardian/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests"/></a>
+  <a href="https://github.com/Wrybill-env/AgentGuardian/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"/></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"/>
+  <img src="https://img.shields.io/badge/status-v0.1.0%20pre--release-orange" alt="Status: v0.1.0 pre-release"/>
 </p>
+
+> **Status: v0.1.0 pre-release.** Observation, failure classification and
+> dry-run planning are the supported v1 capabilities. **Automatic recovery is
+> experimental and restricted** — see [Limitations](#limitations--not-yet-supported).
 
 ---
 
@@ -86,19 +89,17 @@ Agent Guardian provides a **generic, agent-agnostic safety core** plus **agent-s
 | `DRY_RUN` | Determine what *would* happen, report intended actions — **no side effects** | Simulated only |
 | `AUTO_RECOVER` | **Explicit opt-in only** — executes recovery only when safety gate returns `SAFE` | When `SAFE` |
 
-> `AUTO_RECOVER` is never enabled by default. It must be explicitly passed via `--safety-mode auto_recover` or config.
+> `AUTO_RECOVER` is never enabled by default. It must be explicitly passed via `--safety-mode auto_recover` or config, **and it additionally requires a cross-process recovery lease** (supplied automatically by `guardian watch`; refused otherwise).
 
 ---
 
 ## Installation
 
 ```bash
-# From PyPI (when published)
-pip install agent-guardian
-
-# From source
-cd C:\Projects\AgentGuardian
-pip install -e . --break-system-packages
+# From source (no PyPI release yet)
+git clone https://github.com/Wrybill-env/AgentGuardian.git
+cd AgentGuardian
+pip install -e ".[dev]"
 
 # Verify installation
 python -m guardian --help
@@ -191,13 +192,16 @@ python -m guardian config save --path ~/.guardian/config.yaml
 | Session state | VERIFIED | VERIFIED | VERIFIED | SIMULATED |
 | Turn context | VERIFIED | VERIFIED | VERIFIED | SIMULATED |
 | **Safety** | | | | |
-| Verify session identity | VERIFIED | VERIFIED | VERIFIED | SIMULATED |
+| Verify session identity | NO | NO † | VERIFIED | SIMULATED |
 | **Monitoring** | | | | |
 | Detect disconnect | VERIFIED | VERIFIED | VERIFIED | SIMULATED |
 | Detect crash | NO | NO | VERIFIED | SIMULATED |
 | Detect stale | VERIFIED | VERIFIED | VERIFIED | SIMULATED |
 
 *OpenCode forkSession uses unstable ACP API
+
+† Goose sends `agent/session/load` but only checks the response for an error — it
+does **not** verify the returned session identity.
 
 > **Legend:** VERIFIED = Implemented + tested; SIMULATED = Partially implemented/simulated; NO = Not available in protocol
 
@@ -221,23 +225,75 @@ python -m guardian config save --path ~/.guardian/config.yaml
 | Invariant | Implementation |
 |-----------|----------------|
 | `OBSERVE_ONLY` default | `SafetyMode.OBSERVE_ONLY` in all adapters |
-| `UNKNOWN` blocks recovery | `SafetyVerdict.AMBIGUOUS` → `RECOVERY_BLOCKED` |
+| `UNKNOWN` blocks recovery | `SafetyVerdict.AMBIGUOUS` → recovery not authorised |
 | Tool started + no completion = replay blocked | `TurnContext.is_safe_to_replay()` checks `tool_calls_started > 0` |
 | TOCTOU protection | `state_generation` comparison at planning + execution boundary |
 | `AUTO_RECOVER` never auto-enabled | Explicit `--safety-mode auto_recover` required |
-| Reconnect != replay permission | `RECONNECT_STREAM` in `replay_actions` set, requires `verified_fresh=True` |
-| Session identity verified on reconnect | `loadSession` round-trip validates returned `sessionId` matches |
+| `AUTO_RECOVER` requires cross-process exclusion | `GuardianStateMachine` refuses to start recovery when no `RecoveryLease` is configured (fail closed) |
+| Replay/reconnect/reload/fork require proven freshness | all in the `replay_actions` set (`WAIT_AND_RETRY`, `CANCEL_AND_REPLAY`, `RECONNECT_ACP`, `RECONNECT_STREAM`, `RELOAD_SESSION`, `FORK_SESSION`) and denied unless `verified_fresh=True`. **Nothing can currently establish corroborated freshness, so these remain blocked.** |
+| Backend reachability ≠ session recovery | `WAIT_FOR_BACKEND` is blocked when a tool may have executed, and its verification only proves the *backend* is answering — not that the session/turn recovered |
+| Session identity verification scope | OpenCode: `loadSession` round-trip validates the returned `sessionId`. **Goose: not verified** (the load response is only checked for an error) |
+| One safety policy | `HermesSafetyGate` delegates to the core gate and returns the more restrictive verdict |
 | Failed verification = no recovery | All failure paths return `False`, log error |
+
+---
+
+## Limitations & Not Yet Supported
+
+Agent Guardian v0.1.0 is a **pre-release**. What it does today, precisely:
+
+### Supported (evidence-backed)
+- Observation and state tracking (`OBSERVE_ONLY`, the default).
+- Failure classification and diagnostics.
+- Dry-run recovery planning (`DRY_RUN`) — reports intent, executes nothing.
+- Cross-process exclusion for any recovery that does execute.
+- 384 automated tests, including a true two-process lease-exclusion test.
+
+### Experimental / restricted
+- **`AUTO_RECOVER` is experimental.** It requires an explicit opt-in *and* a
+  configured cross-process recovery lease; the state machine refuses to start
+  automatic recovery without one.
+- No adapter can establish corroborated freshness today, so **every
+  replay/reconnect/reload/fork action stays blocked**. The only automatic action
+  that can be selected is `WAIT_FOR_BACKEND`, and only when no tool may have
+  executed; `HUMAN_INTERVENTION` is always available.
+
+### Not validated
+- **No real-agent end-to-end recovery has ever been performed.** All adapter
+  evidence is source inspection plus mock/forensic-subprocess tests. No claim of
+  production reliability for any adapter is made.
+- Goose tool events (`TOOL_CALL_STARTED` / `TOOL_CALL_COMPLETED`) were never
+  observed at runtime with the models available — the parser is source-verified
+  only.
+- FreeBuff/Codebuff is **unverified** (requires credentials).
+- Goose `RELOAD_SESSION` / `FORK_SESSION` read the socket directly instead of
+  through a correlated reader. They are unreachable while those actions remain
+  blocked, but this must be fixed before they could be enabled.
+
+### Known issues
+- Four untracked root audit scripts encode **obsolete safety expectations** and
+  are expected to fail. They are user-owned audit scripts and have deliberately
+  been left unmodified:
+  - `test_persistence_audit.py`, `test_crash_windows.py` and
+    `test_interprocess_locking_windows.py` assert that a *persisted snapshot*
+    grants replay freshness (`verified_fresh=True`).
+  - `test_adversarial_full.py` asserts `WAIT_FOR_BACKEND` is "always safe" even
+    with 5 tools started.
+
+  Both expectations contradict the v1 safety contract. Recommended correction:
+  assert the fail-closed verdicts (`AMBIGUOUS` / not `SAFE`) instead.
+- `tests/integration/forensic/forensic_agent.py` has a pre-existing
+  `IndentationError`; it is unused (the suite uses `forensic_agent_v2.py`).
 
 ---
 
 ## Testing & Evidence
 
 ```bash
-# Standard unit tests (295 tests)
-python -m pytest tests/ -q --ignore=tests/integration/forensic/test_harness.py
+# Full supported suite (384 tests) - includes the 14 forensic integration tests
+python -m pytest tests/ -q
 
-# Forensic integration tests (14 tests, requires Goose Desktop + acp Python package)
+# Forensic integration tests only (14 tests, spawns a subprocess test agent)
 python -m pytest tests/integration/forensic/test_integration.py -q
 
 # Adversarial safety tests (TOCTOU, fault injection, persistence, crash windows)
@@ -338,15 +394,15 @@ C:\Projects\AgentGuardian\
 |--------|------|-------------|
 | Done | Core safety | State machine, safety gate, failure classifier, recovery executor, budgets, TOCTOU |
 | Done | Hermes adapter | In-process observer, simulated recovery |
-| Done | Goose adapter | ACP WebSocket, forensic integration tests (14) |
+| Done (partial) | Goose adapter | ACP WebSocket + 14 forensic integration tests. Tool events **not observed at runtime**. |
 | Done | OpenCode adapter | ACP stdio, real handshake verified, reconnect identity fixed |
-| Done | FreeBuff adapter | HTTP/WS interface, capability declarations |
+| Interface only | FreeBuff adapter | HTTP/WS interface; runtime **UNVERIFIED** (needs credentials) |
 | Done | CLI | observe, watch, doctor, config commands |
-| Done | Packaging | wheel/sdist, entry point, Apache-2.0 |
+| Done | Packaging | wheel/sdist, entry point, Apache-2.0 (`LICENSE` included) |
 | Active | Adapter contracts | Shared parameterized test suite across all adapters |
 | Active | Real-runtime validation | Induced-disconnect recovery for OpenCode/Goose |
 | Planned | Persistence hardening | Crash-window coverage, durability guarantees |
-| Planned | CI integration | GitHub Actions for safety-critical tests |
+| Done | CI integration | GitHub Actions (`.github/workflows/tests.yml`): tests + build + CLI smoke check |
 | Planned | Fault injection framework | Extensible fault injection for all adapters |
 | Future | Codebuff runtime | Requires API credentials |
 | Future | Hermes real-runtime | Requires Hermes agent installation |
@@ -361,15 +417,15 @@ We welcome contributions that improve safety, correctness, or evidence quality.
 
 ### Development Setup
 ```bash
-cd C:\Projects\AgentGuardian
-pip install -e . --break-system-packages
-pip install -e ".[dev]" --break-system-packages
+git clone https://github.com/Wrybill-env/AgentGuardian.git
+cd AgentGuardian
+pip install -e ".[dev]"
 ```
 
 ### Running Tests
 ```bash
-# Standard suite
-python -m pytest tests/ -q --ignore=tests/integration/forensic/test_harness.py
+# Full supported suite
+python -m pytest tests/ -q
 
 # Specific areas
 python -m pytest tests/test_core.py -v

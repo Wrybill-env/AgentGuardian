@@ -130,6 +130,7 @@ class PingMonitor:
         try:
             sent = await self.transport.send_ping(session_id)
             state.total_pings_sent += 1
+            state.last_ping_time = time.time()
             if not sent:
                 state.consecutive_missed += 1
                 if state.consecutive_missed >= self.config.max_missed_pings:
@@ -211,29 +212,61 @@ class PingMonitor:
 
 class WebSocketPingTransport(PingTransport):
     """Ping transport for WebSocket connections (Goose)."""
-    
+
     def __init__(self, ws_dict: Dict[str, Any]):
         self.ws_dict = ws_dict  # session_id -> websocket
-    
+        # session_id -> pending pong awaitable created by send_ping
+        self._pong_futures: Dict[str, Any] = {}
+
     async def send_ping(self, session_id: str) -> bool:
+        """
+        Initiate a ping. The matching pong is awaited (time-boxed) in
+        wait_for_pong. The awaitable is scheduled and stored instead of awaited
+        here so a half-open peer cannot block the monitor indefinitely.
+        """
         ws = self.ws_dict.get(session_id)
         if ws and not ws.closed:
             try:
-                await ws.ping()
+                prev = self._pong_futures.pop(session_id, None)
+                if prev is not None and not prev.done():
+                    prev.cancel()
+                # `ws.ping()` returns an awaitable that completes when the
+                # matching pong arrives. Scheduling it sends the frame; the
+                # bounded wait happens in wait_for_pong.
+                self._pong_futures[session_id] = asyncio.ensure_future(ws.ping())
                 return True
             except Exception:
+                self._pong_futures.pop(session_id, None)
                 return False
         return False
-    
+
     async def wait_for_pong(self, session_id: str, timeout: float) -> bool:
-        # WebSocket ping/pong is handled automatically by the library
-        # The ping() method waits for pong internally
-        # We just need to check if connection is still alive
+        """
+        Wait for the pong matching the last ping, bounded by ``timeout``.
+        Falls back to issuing a fresh ping if send_ping was not called first.
+        A half-open socket yields a timeout (False); a cancelled/late pong is
+        ignored because the pending awaitable is popped before waiting.
+        """
         ws = self.ws_dict.get(session_id)
-        if ws and not ws.closed:
+        if not ws or ws.closed:
+            self._pong_futures.pop(session_id, None)
+            return False
+
+        pending = self._pong_futures.pop(session_id, None)
+        if pending is None:
+            try:
+                pending = ws.ping()
+            except Exception:
+                return False
+
+        try:
+            await asyncio.wait_for(pending, timeout=timeout)
             return True
-        return False
-    
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return False
+        except Exception:
+            return False
+
     def is_connected(self, session_id: str) -> bool:
         ws = self.ws_dict.get(session_id)
         return ws is not None and not ws.closed
@@ -265,7 +298,8 @@ class InProcessPingTransport(PingTransport):
         return True
     
     async def wait_for_pong(self, session_id: str, timeout: float) -> bool:
-        # In-process ping is synchronous - if send_ping returns True, pong received
+        # In-process ping - if send_ping succeeded, pong is received
+        # For agents with async ping, we already awaited in send_ping
         return True
     
     def is_connected(self, session_id: str) -> bool:

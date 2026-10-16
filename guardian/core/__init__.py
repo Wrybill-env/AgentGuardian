@@ -107,6 +107,7 @@ from .recovery_executor import (
 from .adapter_capabilities import (
     AdapterCapability,
     CapabilityResult,
+    CapabilityState,
     AdapterCapabilities,
     AgentAdapter,
     validate_capabilities,
@@ -125,6 +126,15 @@ from .persistence import (
     PERSISTENCE_VERSION,
 )
 from .file_lock import FileLock
+from .recovery_lease import RecoveryLease
+from .freshness import (
+    FreshnessStatus,
+    FreshnessEvidence,
+    AdapterFreshnessReport,
+    evaluate_freshness,
+    apply_freshness,
+    corroborate_freshness,
+)
 
 __all__ = [
     # Types
@@ -231,6 +241,7 @@ __all__ = [
     "HERMES_CAPABILITIES",
     "GOOSE_CAPABILITIES",
     "create_capabilities",
+    "CapabilityState",
     # Persistence
     "StatePersister",
     "PersistenceError",
@@ -242,6 +253,14 @@ __all__ = [
     "PERSISTENCE_VERSION",
     # File locking
     "FileLock",
+    "RecoveryLease",
+    # Freshness evidence
+    "FreshnessStatus",
+    "FreshnessEvidence",
+    "AdapterFreshnessReport",
+    "evaluate_freshness",
+    "apply_freshness",
+    "corroborate_freshness",
     # Failure model
     "FAILURE_TYPE_TO_CATEGORY",
 ]

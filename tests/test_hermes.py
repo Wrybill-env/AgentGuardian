@@ -409,13 +409,15 @@ class TestHermesSafetyGate:
     def test_auto_recover_checks_safety(self):
         gate = HermesSafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
         turn_context = TurnContext(session_id="sess_test")
-        
-        # Safe - no activity
+
+        # No activity, but the state is not proven fresh. The core gate is
+        # stricter here (a live session cannot prove no restart gap), and the
+        # Hermes gate must never be more permissive, so replay is denied.
         result = gate.check_recovery_action_safety(
             RecoveryAction.WAIT_AND_RETRY,
             turn_context,
         )
-        assert result.verdict == HermesSafetyVerdict.SAFE
+        assert result.verdict == HermesSafetyVerdict.AMBIGUOUS
         
         # Unsafe - assistant output observed
         turn_context.assistant_chunks_received = 1
@@ -470,31 +472,48 @@ class TestHermesSafetyGate:
     def test_reconnect_acp_safety(self):
         gate = HermesSafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
         
-        # Safe with session ID
+        # A session id alone is NOT sufficient - reconnect requires corroborated
+        # freshness, so it is blocked (fail closed).
         turn_context = TurnContext(session_id="sess_test")
         result = gate.check_recovery_action_safety(
             RecoveryAction.RECONNECT_ACP,
             turn_context,
         )
-        assert result.verdict == HermesSafetyVerdict.SAFE
+        assert result.verdict == HermesSafetyVerdict.AMBIGUOUS
         
-        # Ambiguous without session ID
+        # Ambiguous without session ID as well
         turn_context = TurnContext(session_id="")
         result = gate.check_recovery_action_safety(
             RecoveryAction.RECONNECT_ACP,
             turn_context,
         )
         assert result.verdict == HermesSafetyVerdict.AMBIGUOUS
+
+        # Corroborated freshness permits the reconnect branch
+        fresh = TurnContext(session_id="sess_test", verified_fresh=True)
+        result = gate.check_recovery_action_safety(
+            RecoveryAction.RECONNECT_ACP,
+            fresh,
+        )
+        assert result.verdict == HermesSafetyVerdict.SAFE
     
-    def test_wait_for_backend_always_safe(self):
+    def test_wait_for_backend_requires_no_possible_tool_execution(self):
         gate = HermesSafetyGate(safety_mode=SafetyMode.AUTO_RECOVER)
         turn_context = TurnContext(session_id="sess_test")
         turn_context.assistant_chunks_received = 10
         turn_context.tool_calls_started = 5
         
+        # Not unconditionally safe: the handler reconnects and abandons the turn
         result = gate.check_recovery_action_safety(
             RecoveryAction.WAIT_FOR_BACKEND,
             turn_context,
+        )
+        assert result.verdict != HermesSafetyVerdict.SAFE
+
+        clean = TurnContext(session_id="sess_test")
+        result = gate.check_recovery_action_safety(
+            RecoveryAction.WAIT_FOR_BACKEND,
+            clean,
         )
         assert result.verdict == HermesSafetyVerdict.SAFE
     
@@ -528,8 +547,9 @@ class TestHermesSafetyGate:
         class MockClassification:
             recommended_action = RecoveryAction.WAIT_AND_RETRY
         
+        # Not proven fresh -> prompt replay denied (fail closed)
         result = gate.evaluate_recovery_decision(MockClassification(), turn_context)
-        assert result.verdict == HermesSafetyVerdict.SAFE
+        assert result.verdict == HermesSafetyVerdict.AMBIGUOUS
         
         # With assistant output - should be unsafe
         turn_context.assistant_chunks_received = 1

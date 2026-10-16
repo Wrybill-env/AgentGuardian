@@ -23,8 +23,10 @@ from .safety_gate import SafetyGate, SafetyVerdict
 from .backoff import BackoffStrategy, BackoffConfig, DEFAULT_BACKOFF
 from .recovery_executor import RecoveryExecutor
 from .recovery_ladder import RecoveryLadder, LadderConfig
+from .recovery_lease import RecoveryLease
 from .adapter_capabilities import AgentAdapter
 from .recovery_budget import RecoveryBudgetManager
+from .session_state import SessionState, TurnState, SideEffectEvidence
 from .ping_monitor import PingMonitor, PingConfig, InProcessPingTransport, WebSocketPingTransport
 
 
@@ -151,6 +153,7 @@ class GuardianStateMachine:
         on_recovery_action: Optional[Callable[[RecoveryAction, dict], Any]] = None,
         on_recovery_result: Optional[Callable[[bool, dict], None]] = None,
         adapter: Optional[AgentAdapter] = None,
+        recovery_lease: Optional["RecoveryLease"] = None,
     ):
         self.current_state = GuardianState.IDLE
         self.safety_mode = safety_mode
@@ -184,6 +187,7 @@ class GuardianStateMachine:
             budget_manager=RecoveryBudgetManager(),
             ladder=self.ladder,
             default_mode=safety_mode,
+            recovery_lease=recovery_lease,
         )
 
         self.adapter = adapter
@@ -200,6 +204,11 @@ class GuardianStateMachine:
         self.turn_context: Optional[TurnContext] = None
         self.current_failure: Optional[FailureClassification] = None
         self.recovery_history: List[RecoveryAttempt] = []
+        # Most recent recovery plan + execution result (for diagnostics/explain).
+        self.last_plan: Optional[Any] = None
+        self.last_recovery_result: Optional[Any] = None
+        # Guard against repeated events initiating duplicate recovery execution.
+        self._recovery_in_flight: bool = False
         self.transition_history: List[StateTransition] = []
         self.metrics = GuardianMetrics()
 
@@ -386,6 +395,9 @@ class GuardianStateMachine:
 
     def _attempt_recovery(self) -> bool:
         if not self.current_failure: return False
+        if self._recovery_in_flight:
+            print(f"RECOVERY ALREADY IN FLIGHT ({self.current_failure.failure_type.value}); ignoring duplicate attempt")
+            return False
         action = self.current_failure.recommended_action
         if self.safety_mode == SafetyMode.OBSERVE_ONLY:
             print(f"OBSERVE_ONLY: Would attempt {action.value}")
@@ -409,52 +421,112 @@ class GuardianStateMachine:
             print("AUTO_RECOVER: No adapter configured, cannot execute recovery")
             self.current_state = GuardianState.POSSIBLE_FAILURE
             return False
+        # Release-blocking safety requirement: automatic recovery must never run
+        # without cross-process exclusion. Refuse to schedule if no lease is
+        # configured (fail closed) rather than execute unprotected.
+        if getattr(self.recovery_executor, "recovery_lease", None) is None:
+            print(
+                "AUTO_RECOVER: no recovery lease configured - refusing automatic recovery "
+                "(cross-process exclusion is required for AUTO_RECOVER)"
+            )
+            self.current_state = GuardianState.POSSIBLE_FAILURE
+            return False
         print(f"RECOVERY ATTEMPT: {action.value}")
         self.transition(StateMachineEvent.RECOVERY_STARTED, {"action": action.value, "failure": self.current_failure.failure_type.value})
         attempt = RecoveryAttempt(attempt_number=len(self.recovery_history)+1, failure_type=self.current_failure.failure_type, action_taken=action, timestamp=datetime.now(), delay_seconds=self.backoff.state.last_delay, success=False)
         self.recovery_history.append(attempt)
         self.metrics.recovery_attempts += 1
+        self._recovery_in_flight = True
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                task = loop.create_task(self._execute_recovery_async())
+                loop.create_task(self._execute_recovery_async())
                 print(f"RECOVERY SCHEDULED: {action.value}")
                 return True
             else:
                 result = loop.run_until_complete(self._execute_recovery_async())
                 return result
         except Exception as e:
+            self._recovery_in_flight = False
             print(f"Recovery execution error: {e}")
             self.current_state = GuardianState.POSSIBLE_FAILURE
             return False
 
     async def _execute_recovery_async(self) -> bool:
-        if not self.current_failure or not self.adapter or not self.turn_context: return False
+        """Execute a recovery plan; clears the in-flight guard on every exit."""
+        self._recovery_in_flight = True
+        try:
+            return await self._execute_recovery_impl()
+        finally:
+            self._recovery_in_flight = False
+
+    async def _execute_recovery_impl(self) -> bool:
+        if not self.current_failure or not self.adapter or not self.turn_context:
+            return False
         from .recovery_planner import RecoveryPlanner, RecoveryContext
-        from .recovery_ladder import RecoveryLadder, LadderConfig
-        from .recovery_budget import RecoveryBudgetManager, RecoveryBudgetConfig
-        from .backoff import BackoffStrategy, BackoffConfig
+
         ladder = self.ladder if hasattr(self, 'ladder') else RecoveryLadder(LadderConfig())
         budget_manager = self.recovery_executor.budget_manager
         backoff = self.backoff
-        planner = RecoveryPlanner(safety_gate=self.safety_gate, budget_manager=budget_manager, ladder=ladder, backoff=backoff)
+        planner = RecoveryPlanner(
+            safety_gate=self.safety_gate,
+            budget_manager=budget_manager,
+            ladder=ladder,
+            backoff=backoff,
+        )
+
+        # Build a SideEffectEvidence view from the authoritative TurnContext
+        # (used by the planner for ladder eligibility / delay calculation).
+        evidence = SideEffectEvidence()
+        evidence.assistant_chunks_received = self.turn_context.assistant_chunks_received
+        evidence.visible_text_delivered = self.turn_context.assistant_chunks_received > 0
+        evidence.tools_started = ["tool"] * self.turn_context.tool_calls_started
+        evidence.tools_completed = ["tool"] * self.turn_context.tool_calls_completed
+        evidence.turn_phase = self.turn_context.phase
+        evidence.stop_reason = self.turn_context.stop_reason
+
+        # Collect stream-level partial tool evidence (for executor TOCTOU checks).
+        partial_tool_names: List[str] = []
+        if self.observer and self.turn_context:
+            try:
+                partial_tool_names = list(
+                    self.observer.get_session_state(self.turn_context.session_id).get_partial_tool_names()
+                )
+            except Exception:
+                partial_tool_names = []
+
         context = RecoveryContext(
-            session=SessionState(session_id=self.turn_context.session_id, turn_states=[], created_at=0),
-            current_turn=TurnState(turn_id=self.turn_context.run_id or "unknown", session_id=self.turn_context.session_id, phase=TurnPhase(self.turn_context.phase.value), evidence=None),
+            session=SessionState(session_id=self.turn_context.session_id, turn_history=[]),
+            current_turn=TurnState(
+                turn_id=self.turn_context.run_id or "unknown",
+                session_id=self.turn_context.session_id,
+                evidence=evidence,
+            ),
+            turn_context=self.turn_context,
             failure_classification=self.current_failure,
             adapter_capabilities={cap.value: True for cap in self.adapter.capabilities.get_available()},
             adapter_name=self.adapter.capabilities.adapter_name,
             safety_mode=self.safety_mode,
         )
         plan = planner.create_plan(context)
-        result = await self.recovery_executor.execute_plan(plan=plan, adapter=self.adapter, current_session_state=self.turn_context, current_stream_state={"partial_tool_names": self.observer.get_session_state(self.turn_context.session_id).get_partial_tool_names() if self.observer and self.turn_context else []})
+        # Ensure the planning-time snapshot records the stream-level evidence too.
+        plan.state_snapshot["partial_tool_names"] = list(partial_tool_names)
+
+        self.last_plan = plan
+        result = await self.recovery_executor.execute_plan(
+            plan=plan,
+            adapter=self.adapter,
+            current_session_state=self.turn_context,
+            current_stream_state={"partial_tool_names": list(partial_tool_names)},
+        )
+        self.last_recovery_result = result
         if result.success:
             self.metrics.successful_recoveries += 1
-            self.transition(StateMachineEvent.RECOVERY_COMPLETE, {"action": action.value, "result": result.result.value})
+            self.transition(StateMachineEvent.RECOVERY_COMPLETE, {"action": plan.recommended_action.value, "result": result.result.value})
             return True
         else:
             self.metrics.failed_recoveries += 1
-            self.transition(StateMachineEvent.RECOVERY_FAILED, {"action": action.value, "error": result.message})
+            self.transition(StateMachineEvent.RECOVERY_FAILED, {"action": plan.recommended_action.value, "error": result.message})
             return False
 
     def _verify_recovery(self, data: dict = None) -> bool:
@@ -479,6 +551,50 @@ class GuardianStateMachine:
             return
         self.current_state = GuardianState.POSSIBLE_FAILURE
         print(f"RECOVERY FAILED: {error}, will retry after backoff")
+
+    def explain_last_recovery(self) -> dict:
+        """
+        Structured, secret-safe explanation of the most recent recovery decision.
+
+        Answers: what failed, the evidence, which action was chosen, the safety
+        verdict and why, which capability/budget constrained it, and whether an
+        action was attempted and how it ended. Never includes payloads/secrets.
+        """
+        plan = self.last_plan
+        result = self.last_recovery_result
+        if plan is None:
+            return {"available": False, "reason": "No recovery decision has been made yet"}
+
+        fc = getattr(plan, "failure_classification", None)
+        execution = {"attempted": False}
+        if result is not None:
+            execution = {
+                "attempted": True,
+                "result": result.result.value,
+                "success": result.success,
+                "message": result.message,
+            }
+
+        return {
+            "available": True,
+            "failure": {
+                "type": fc.failure_type.value if fc else None,
+                "retryable": getattr(fc, "retryable", None),
+                "replay_safe": getattr(fc, "replay_safe", None),
+            },
+            "action": plan.recommended_action.value,
+            "safety": {
+                "verdict": plan.safety_verdict.value,
+                "reason": plan.safety_reason,
+                "blocking_factors": list(plan.safety_blocking_factors),
+            },
+            "required_capabilities": list(plan.required_capabilities),
+            "available_capabilities": list(plan.available_capabilities),
+            "missing_capabilities": list(plan.missing_capabilities),
+            "budget": plan.budget_status,
+            "explanation": plan.reason,
+            "execution": execution,
+        }
 
     def get_status(self) -> dict:
         return {

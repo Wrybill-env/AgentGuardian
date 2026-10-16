@@ -8,8 +8,24 @@ Each capability corresponds to an actual executable operation.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from abc import ABC, abstractmethod
+from enum import Enum
 
 from .types import AdapterCapability, RecoveryAction
+
+
+class CapabilityState(Enum):
+    """
+    Three-state capability declaration.
+
+    A capability must never be *assumed* available. These three states are
+    distinct and must not be conflated:
+      * SUPPORTED   - declared available, backed by an implemented operation
+      * UNSUPPORTED - declared unavailable
+      * UNKNOWN     - not declared; availability cannot be determined
+    """
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -47,6 +63,18 @@ class AdapterCapabilities:
         """Check if a capability is available."""
         result = self.capabilities.get(capability)
         return result.available if result else False
+
+    def state(self, capability: AdapterCapability) -> "CapabilityState":
+        """
+        Three-state view of a capability.
+
+        Returns SUPPORTED / UNSUPPORTED / UNKNOWN. Only SUPPORTED is treated as
+        available; both UNSUPPORTED and UNKNOWN fail closed for automatic use.
+        """
+        result = self.capabilities.get(capability)
+        if result is None:
+            return CapabilityState.UNKNOWN
+        return CapabilityState.SUPPORTED if result.available else CapabilityState.UNSUPPORTED
     
     def get(self, capability: AdapterCapability) -> Optional[CapabilityResult]:
         """Get capability result."""
@@ -152,6 +180,23 @@ class AgentAdapter(ABC):
     def get_status(self) -> Dict[str, Any]:
         """Get adapter status for diagnostics."""
         pass
+
+    # --- Freshness evidence (OPTIONAL; only meaningful for replay-capable agents) ---
+
+    async def provide_freshness_report(self, session_id: str, observed: Any = None):
+        """
+        Supply protocol-appropriate evidence that the live session is continuous
+        with Guardian's local observation.
+
+        Returns an :class:`guardian.core.freshness.AdapterFreshnessReport`, or
+        ``None`` when the adapter cannot corroborate freshness. Returning None
+        (the default) means replay stays blocked — which is the safe outcome.
+
+        Adapters MUST NOT simply return a report claiming ``live=True``; the
+        report must be backed by the agent's own protocol (e.g. a session-listing
+        call with a monotonic ``updatedAt`` marker).
+        """
+        return None
 
 
 # Capability validation helpers

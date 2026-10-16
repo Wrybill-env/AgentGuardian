@@ -14,6 +14,7 @@ from .types import (
     SafetyVerdict,
     SafetyMode,
     FailureClassification,
+    TurnContext,
 )
 from .session_state import SessionState, TurnState, SideEffectEvidence
 from .safety_gate import SafetyGate, SafetyCheckResult
@@ -60,7 +61,11 @@ class RecoveryPlan:
     # Timing
     created_at: float = field(default_factory=time.time)
     valid_until: Optional[float] = None
-    
+
+    # Planning-time state snapshot used by the executor for TOCTOU revalidation.
+    # Must reflect the *same* observation the plan was built from.
+    state_snapshot: Dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "plan_id": self.plan_id,
@@ -83,6 +88,7 @@ class RecoveryPlan:
             "confidence": self.confidence,
             "created_at": self.created_at,
             "valid_until": self.valid_until,
+            "state_snapshot": self.state_snapshot,
         }
 
 
@@ -92,9 +98,13 @@ class RecoveryContext:
     # State
     session: SessionState
     current_turn: Optional[TurnState] = None
-    
+
     # Failure
     failure_classification: Optional[FailureClassification] = None
+
+    # Authoritative turn context for safety evaluation (agent-agnostic).
+    # When provided, this is used directly by the safety gate.
+    turn_context: Optional[TurnContext] = None
     
     # Adapter capabilities
     adapter_capabilities: Dict[str, bool] = field(default_factory=dict)
@@ -149,7 +159,11 @@ class RecoveryPlanner:
             session_id=context.session.session_id,
             turn_id=context.current_turn.turn_id if context.current_turn else None,
         )
-        
+
+        # Capture the planning-time state snapshot so the executor can detect
+        # any state change between planning and execution (TOCTOU protection).
+        plan.state_snapshot = self._build_state_snapshot(context)
+
         # No failure = no recovery needed
         if not context.failure_classification:
             plan.recommended_action = RecoveryAction.NONE
@@ -206,20 +220,46 @@ class RecoveryPlanner:
         
         return plan
     
+    def _build_state_snapshot(self, context: "RecoveryContext") -> Dict[str, Any]:
+        """
+        Build the planning-time state snapshot consumed by the executor for
+        TOCTOU revalidation. Uses the authoritative TurnContext when available.
+        Returns {} when no turn context is available (executor then falls back
+        to the live session state, which is the fail-closed default for a
+        no-side-effect turn).
+        """
+        turn = context.turn_context
+        if turn is None:
+            return {}
+        phase = getattr(turn, "phase", None)
+        return {
+            "assistant_chunks": getattr(turn, "assistant_chunks_received", 0),
+            "tools_started": getattr(turn, "tool_calls_started", 0),
+            "partial_tool_names": [],
+            "turn_phase": phase.value if hasattr(phase, "value") else str(phase),
+            "stop_reason": getattr(turn, "stop_reason", None),
+            "session_id": getattr(turn, "session_id", ""),
+            "state_generation": getattr(turn, "state_generation", 0),
+        }
+
     def _evaluate_all_actions_safety(
         self,
         context: RecoveryContext,
         plan: RecoveryPlan,
     ) -> Dict[RecoveryAction, SafetyCheckResult]:
         """Evaluate safety for all possible recovery actions."""
-        turn_context = context.current_turn.evidence if context.current_turn else None
-        # Convert TurnState evidence to TurnContext format for safety gate
-        # For now, use a simple adapter
-        
+        # Prefer the authoritative TurnContext; fall back to a TurnState's
+        # evidence only for backward compatibility with older callers.
+        turn_context = context.turn_context
+        if turn_context is None and context.current_turn is not None:
+            turn_context = context.current_turn.evidence
+
+        failure = context.failure_classification
         results = {}
-        
+
         # Get hinted actions from failure classification
-        hinted_actions = failure.recovery_hints.recommended_actions
+        hints = getattr(failure, "recovery_hints", None) if failure is not None else None
+        hinted_actions = list(hints.recommended_actions) if hints is not None else []
         
         # Map string actions to enum
         action_map = {
@@ -406,16 +446,17 @@ class RecoveryPlanner:
         plan: RecoveryPlan,
     ) -> float:
         """Calculate delay for the recovery action."""
-        
+
         # For ladder-eligible failures, use ladder
         if action in (RecoveryAction.WAIT_AND_RETRY, RecoveryAction.RECONNECT_STREAM, 
                       RecoveryAction.CANCEL_AND_REPLAY):
-            # Check ladder eligibility
-            turn = context.current_turn
-            visible_output = turn.evidence.visible_text_delivered if turn else False
-            tool_activity = len(turn.evidence.tools_started) > 0 if turn else False
-            
-            # Try ladder first
+            # Check ladder eligibility against observed side-effect evidence
+            evidence = context.current_turn.evidence if context.current_turn else None
+            visible_output = bool(getattr(evidence, "visible_text_delivered", False)) if evidence else False
+            tools_started = getattr(evidence, "tools_started", []) if evidence else []
+            tool_activity = len(tools_started) > 0
+
+            # Try ladder first (fall back to backoff when the ladder declines)
             ladder_delay = self.ladder.get_next_delay(
                 visible_output_delivered=visible_output,
                 tool_activity_observed=tool_activity,
@@ -428,7 +469,8 @@ class RecoveryPlanner:
             return self.backoff.next_delay()
         
         # For other actions, use hinted base backoff
-        return failure.recovery_hints.base_backoff_seconds
+        hints = getattr(failure, "recovery_hints", None) if failure is not None else None
+        return hints.base_backoff_seconds if hints is not None else 0.0
 
 
 @dataclass
