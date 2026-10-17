@@ -1,5 +1,5 @@
 """
-Hermes-specific safety gate for Agent Guardian.
+Hermes-specific safety gate for Strixora.
 
 This is the PRIMARY safety gate that prevents unsafe replay/recovery operations.
 All recovery actions must pass through this gate.

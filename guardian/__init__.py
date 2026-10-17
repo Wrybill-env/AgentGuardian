@@ -1,12 +1,12 @@
 """
-Agent Guardian - AI Coding Agent Reliability Layer
+Strixora - AI Coding Agent Reliability Layer
 
 A safety-first reliability layer for AI coding agents.
 Provides observation, failure detection, and recovery for Hermes, Goose, OpenCode, and FreeBuff.
 """
 
 __version__ = "0.1.0"
-__author__ = "Agent Guardian Project"
+__author__ = "Strixora Project"
 
 # Core exports
 from guardian.core import (

@@ -1,5 +1,5 @@
 """
-Fault Injection Test Harness for Agent Guardian.
+Fault Injection Test Harness for Strixora.
 
 This module provides a deterministic test harness that can simulate various
 failure scenarios and verify Guardian's safety decisions.

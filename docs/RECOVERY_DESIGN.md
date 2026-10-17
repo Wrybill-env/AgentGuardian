@@ -1,4 +1,4 @@
-# Agent Guardian - Recovery Design
+# Strixora - Recovery Design
 
 **Version:** 0.1.0
 **Status:** MVP Design Complete

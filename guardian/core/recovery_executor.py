@@ -1,5 +1,5 @@
 """
-Recovery Executor for Agent Guardian.
+Recovery Executor for Strixora.
 
 Executes planned recovery actions with mandatory safety revalidation.
 Only executes actions where the adapter has VERIFIED_IMPLEMENTED capability.

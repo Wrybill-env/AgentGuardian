@@ -1,5 +1,5 @@
 """
-Capability Discovery for Agent Guardian.
+Capability Discovery for Strixora.
 
 Implements discovery mechanisms for agent capabilities through verified sources:
 - Source inspection

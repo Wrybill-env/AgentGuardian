@@ -1,5 +1,5 @@
 """
-Unified event model for Agent Guardian.
+Unified event model for Strixora.
 
 Provides a generic event taxonomy that works across different agents
 (ACP events, Hermes callbacks, etc.) with structured evidence tracking.

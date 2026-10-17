@@ -1,15 +1,15 @@
-# Agent Guardian — Hermes Research & Integration Design
+# Strixora — Hermes Research & Integration Design
 
 **Date:** 2026-10-03  
 **Hermes Version:** Current (installed at `C:\Users\Mitansh Kulshreshtha\AppData\Local\hermes\hermes-agent\`)  
-**Agent Guardian Location:** `C:\Projects\AgentGuardian`  
+**Strixora Location:** `C:\Projects\AgentGuardian`  
 **Platform:** Windows 11
 
 ---
 
 ## 1. Executive Summary
 
-This document captures a complete architectural investigation of Hermes Agent to inform the design of **Agent Guardian** — an external watchdog that detects transient failures (rate limits, network errors, stream stalls, backend crashes) and recovers safely **without duplicating side effects** (tool calls, file writes, API calls).
+This document captures a complete architectural investigation of Hermes Agent to inform the design of **Strixora** — an external watchdog that detects transient failures (rate limits, network errors, stream stalls, backend crashes) and recovers safely **without duplicating side effects** (tool calls, file writes, API calls).
 
 **Key Architectural Findings:**
 

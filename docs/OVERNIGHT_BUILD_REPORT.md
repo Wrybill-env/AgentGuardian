@@ -1,4 +1,4 @@
-# Agent Guardian - Overnight Build Report
+# Strixora - Overnight Build Report
 
 **Date:** 2026-10-03
 **Version:** 0.1.0 (MVP)

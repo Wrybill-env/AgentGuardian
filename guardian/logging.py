@@ -1,5 +1,5 @@
 """
-Logging configuration for Agent Guardian.
+Logging configuration for Strixora.
 """
 
 import logging

@@ -1,4 +1,4 @@
-"""OpenCode Adapter for Agent Guardian.
+"""OpenCode Adapter for Strixora.
 
 Connects OpenCode (via ACP stdio or HTTP) to Guardian core.
 """

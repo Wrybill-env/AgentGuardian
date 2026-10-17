@@ -230,7 +230,7 @@ python -m guardian observe -v
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Agent Guardian (Python)                                     │
+│ Strixora (Python)                                           │
 │  ├─ discovery.py    → Port scan + /status check             │
 │  ├─ observer.py     → WebSocket + event processing          │
 │  ├─ protocol.py     → ACP frame parsing + classification    │

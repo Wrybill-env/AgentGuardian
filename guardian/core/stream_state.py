@@ -1,5 +1,5 @@
 """
-Stream lifecycle state tracking for Agent Guardian.
+Stream lifecycle state tracking for Strixora.
 
 Tracks streaming-specific state including timing for stale detection.
 """

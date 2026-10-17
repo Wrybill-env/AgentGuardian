@@ -1,5 +1,5 @@
 """
-Freshness evidence model for Agent Guardian.
+Freshness evidence model for Strixora.
 
 `verified_fresh` is the ONLY signal that authorizes *replay* recovery actions
 (WAIT_AND_RETRY / CANCEL_AND_REPLAY). This module defines exactly what evidence

@@ -1,5 +1,5 @@
 """
-Command-line interface for Agent Guardian.
+Command-line interface for Strixora.
 """
 
 import argparse
@@ -79,7 +79,7 @@ class GuardianCLI:
         # Main parser
         parser = argparse.ArgumentParser(
             prog="python -m guardian",
-            description="Agent Guardian - AI Coding Agent Reliability Layer",
+            description="Strixora - AI Coding Agent Reliability Layer",
             parents=[global_parser],
         )
         

@@ -1,16 +1,16 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Agent Guardian" width="180" height="180"/>
+  <img src="assets/logo.svg" alt="Strixora" width="180" height="180"/>
 </p>
 
-<h1 align="center">Agent Guardian</h1>
+<h1 align="center">Strixora</h1>
 
 <p align="center">
   <strong>Safety-first reliability for AI coding agents</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/Wrybill-env/AgentGuardian/actions/workflows/tests.yml"><img src="https://github.com/Wrybill-env/AgentGuardian/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests"/></a>
-  <a href="https://github.com/Wrybill-env/AgentGuardian/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"/></a>
+  <a href="https://github.com/Wrybill-env/Strixora/actions/workflows/tests.yml"><img src="https://github.com/Wrybill-env/Strixora/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests"/></a>
+  <a href="https://github.com/Wrybill-env/Strixora/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"/></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"/>
   <img src="https://img.shields.io/badge/status-v0.1.0%20pre--release-orange" alt="Status: v0.1.0 pre-release"/>
 </p>
@@ -25,7 +25,7 @@
 
 AI coding agents (Goose, OpenCode, Hermes, Codebuff) execute tools that modify files, run commands, and call APIs. When a stream fails — network glitch, rate limit, crash — **the agent may have already executed the tool**. Blindly retrying the prompt duplicates the side effect: a file gets written twice, a command runs twice, an API is called twice.
 
-**Agent Guardian prevents this.** It observes the agent's event stream, tracks exactly what side effects have been observed, and only permits recovery when it can *prove* no ambiguous execution occurred.
+**Strixora prevents this.** It observes the agent's event stream, tracks exactly what side effects have been observed, and only permits recovery when it can *prove* no ambiguous execution occurred.
 
 ---
 
@@ -49,7 +49,7 @@ OBSERVE -> CLASSIFY -> VERIFY STATE -> CHECK SAFETY -> RECOVER ONLY WHEN PROVABL
 
 ## How It Works
 
-Agent Guardian provides a **generic, agent-agnostic safety core** plus **agent-specific adapters** that translate each agent's protocol into Guardian's unified event model.
+Strixora provides a **generic, agent-agnostic safety core** plus **agent-specific adapters** that translate each agent's protocol into Guardian's unified event model.
 
 ### Architecture
 
@@ -97,8 +97,8 @@ Agent Guardian provides a **generic, agent-agnostic safety core** plus **agent-s
 
 ```bash
 # From source (no PyPI release yet)
-git clone https://github.com/Wrybill-env/AgentGuardian.git
-cd AgentGuardian
+git clone https://github.com/Wrybill-env/Strixora.git
+cd Strixora
 pip install -e ".[dev]"
 
 # Verify installation
@@ -240,7 +240,7 @@ does **not** verify the returned session identity.
 
 ## Limitations & Not Yet Supported
 
-Agent Guardian v0.1.0 is a **pre-release**. What it does today, precisely:
+Strixora v0.1.0 is a **pre-release**. What it does today, precisely:
 
 ### Supported (evidence-backed)
 - Observation and state tracking (`OBSERVE_ONLY`, the default).
@@ -322,7 +322,7 @@ python test_adversarial.py && python test_adversarial_full.py && python test_res
 python -m build
 
 # Install from local wheel
-pip install dist/agent_guardian-0.1.0-py3-none-any.whl --break-system-packages
+pip install dist/strixora-0.1.0-py3-none-any.whl
 
 # Verify CLI
 python -m guardian --help
@@ -417,8 +417,8 @@ We welcome contributions that improve safety, correctness, or evidence quality.
 
 ### Development Setup
 ```bash
-git clone https://github.com/Wrybill-env/AgentGuardian.git
-cd AgentGuardian
+git clone https://github.com/Wrybill-env/Strixora.git
+cd Strixora
 pip install -e ".[dev]"
 ```
 
@@ -459,7 +459,7 @@ Apache-2.0 — see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <img src="assets/logo.svg" alt="Agent Guardian" width="120" height="120"/>
+  <img src="assets/logo.svg" alt="Strixora" width="120" height="120"/>
   <br/>
   <strong>Observe -> Classify -> Verify State -> Check Safety -> Recover only when provably safe</strong>
 </p>

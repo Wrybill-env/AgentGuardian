@@ -1,5 +1,5 @@
 """
-FreeBuff Adapter for Agent Guardian.
+FreeBuff Adapter for Strixora.
 
 Connects FreeBuff (Codebuff) via HTTP API / WebSocket to Guardian core.
 """

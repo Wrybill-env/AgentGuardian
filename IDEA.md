@@ -1,8 +1,8 @@
-# Agent Guardian
+# Strixora
 
 ## The Idea
 
-Agent Guardian is an open-source watchdog and recovery system for AI coding agents.
+Strixora is an open-source watchdog and recovery system for AI coding agents.
 
 AI coding agents like Goose, OpenCode, Hermes, and others can randomly stop working because of temporary failures such as:
 
@@ -19,7 +19,7 @@ AI coding agents like Goose, OpenCode, Hermes, and others can randomly stop work
 
 Right now, many agents treat these failures as a reason to stop the task.
 
-Agent Guardian's goal is to prevent temporary failures from killing long-running agent tasks.
+Strixora's goal is to prevent temporary failures from killing long-running agent tasks.
 
 Instead of:
 
@@ -32,7 +32,7 @@ Agent → temporary failure → Guardian detects it → waits/backoffs → safel
 
 ## Core Concept
 
-Agent Guardian runs outside the AI coding agent as a supervisor/watchdog.
+Strixora runs outside the AI coding agent as a supervisor/watchdog.
 
 It monitors the agent's process, session, protocol, and streaming activity.
 
@@ -112,7 +112,7 @@ These values should be configurable.
 
 ## Safety Principle
 
-The most important rule of Agent Guardian:
+The most important rule of Strixora:
 
 NEVER blindly replay an agent action when doing so could duplicate side effects.
 
@@ -137,9 +137,9 @@ False negatives are preferable to accidentally executing a tool twice.
 
 ## Architecture
 
-Agent Guardian should have an agent-agnostic core with adapters for individual agents.
+Strixora should have an agent-agnostic core with adapters for individual agents.
 
-Agent Guardian
+Strixora
 ├── Core Engine
 │   ├── Failure Detection
 │   ├── State Machine
@@ -286,7 +286,7 @@ Guardian performs only recovery operations that have been proven safe for the sp
 
 ## Important Design Constraint
 
-Agent Guardian should NOT modify the source code of the agents it monitors.
+Strixora should NOT modify the source code of the agents it monitors.
 
 It should operate externally wherever possible.
 
@@ -301,7 +301,7 @@ This makes it:
 
 ## Long-Term Goal
 
-The long-term goal is for Agent Guardian to become a general-purpose reliability layer for AI coding agents.
+The long-term goal is for Strixora to become a general-purpose reliability layer for AI coding agents.
 
 Instead of every agent independently implementing:
 
@@ -312,11 +312,11 @@ Instead of every agent independently implementing:
 - crash recovery
 - session recovery
 
-Agent Guardian can provide that reliability externally.
+Strixora can provide that reliability externally.
 
 The user should be able to start a long-running coding task without having to babysit the agent every time a provider temporarily dies.
 
 
 ## One Sentence
 
-Agent Guardian is a universal watchdog for AI coding agents that detects transient failures, waits and recovers when safe, and refuses to blindly replay actions when recovery could cause side effects.
+Strixora is a universal watchdog for AI coding agents that detects transient failures, waits and recovers when safe, and refuses to blindly replay actions when recovery could cause side effects.

@@ -1,5 +1,5 @@
 """
-Hermes Agent integration module for Agent Guardian.
+Hermes Agent integration module for Strixora.
 """
 
 from .observer import HermesObserver, HermesSessionState, run_hermes_observer

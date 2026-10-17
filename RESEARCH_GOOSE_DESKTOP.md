@@ -1,6 +1,6 @@
-# Agent Guardian — Goose Desktop Research
+# Strixora — Goose Desktop Research
 
-**Project:** Agent Guardian (external Python watchdog/supervisor for Goose Desktop on Windows)
+**Project:** Strixora (external Python watchdog/supervisor for Goose Desktop on Windows)
 **Research Date:** 2026-10-02
 **Goose Version:** 1.52.0 (Desktop), CLI source at `C:\Projects\AgentGuardian\goose-cli-source`
 **Local Goose Desktop Install:** `C:\Users\Mitansh Kulshreshtha\Downloads\Goose-win32-x64 (1)\dist-windows`
@@ -10,7 +10,7 @@
 
 ## 1. Executive Summary
 
-This document captures a complete architectural investigation of Goose Desktop (v1.52.0) to inform the design of **Agent Guardian** — an external Python watchdog that detects transient failures (rate limits, network errors, stream stalls, backend crashes) and recovers safely **without duplicating side effects** (tool calls, file writes, API calls).
+This document captures a complete architectural investigation of Goose Desktop (v1.52.0) to inform the design of **Strixora** — an external Python watchdog that detects transient failures (rate limits, network errors, stream stalls, backend crashes) and recovers safely **without duplicating side effects** (tool calls, file writes, API calls).
 
 **Key Architectural Findings:**
 
@@ -507,7 +507,7 @@ Goose Desktop Renderer          Guardian Proxy          goose serve Backend
 ### 13.1 Components
 
 ```
-Agent Guardian MVP (Python)
+Strixora MVP (Python)
 ├── discovery.py
 │   ├── scan_localhost_ports() → find /status endpoint
 │   ├── extract_acp_url() → parse token from WebSocket upgrade

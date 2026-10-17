@@ -18,7 +18,7 @@ The observer integrates with Hermes Agent by wrapping its existing callback syst
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Agent Guardian (Python)                                         │
+│ Strixora (Python)                                               │
 │  ├─ HermesObserver                                              │
 │  │   ├─ HermesSessionState (per-session tracking)              │
 │  │   ├─ HermesFailureDetector (failure pattern detection)      │
@@ -296,7 +296,7 @@ The observer cannot safely perform recovery because:
 ## Architecture
 
 ```
-Agent Guardian (Python)
+Strixora (Python)
 ├── Core (agent-agnostic)
 │   ├── FailureClassifier → maps errors to FailureType
 │   ├── SafetyGate → checks replay safety

@@ -1,5 +1,5 @@
 """
-OpenCode Adapter for Agent Guardian.
+OpenCode Adapter for Strixora.
 """
 
 from .adapter import OpenCodeAdapter, OpenCodeAdapterConfig

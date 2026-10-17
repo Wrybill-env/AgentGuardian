@@ -1,8 +1,8 @@
-# Agent Guardian Full System Forensic Audit
+# Strixora Full System Forensic Audit
 
 ## Executive Verdict
 
-**Agent Guardian is a safety-first reliability layer with a well-architected core, but critical runtime gaps prevent AUTO_RECOVERY from being safe.**
+**Strixora is a safety-first reliability layer with a well-architected core, but critical runtime gaps prevent AUTO_RECOVERY from being safe.**
 
 | Aspect | Status |
 |--------|--------|
@@ -1052,7 +1052,7 @@ If tool events remain unavailable:
 
 ## 27. Final Verdict
 
-### What Agent Guardian ACTUALLY Implements Today
+### What Strixora ACTUALLY Implements Today
 
 | Category | Implementation |
 |----------|----------------|
@@ -1174,4 +1174,4 @@ ONLY THEN CONSIDER AUTO_RECOVER
 
 ---
 
-**AUDIT COMPLETE** — Agent Guardian has a sound safety architecture but critical runtime observability gaps prevent AUTO_RECOVERY from being safe. The highest-priority technical problem is Goose ACP not emitting tool call events, which invalidates all tool-related safety guarantees.
+**AUDIT COMPLETE** — Strixora has a sound safety architecture but critical runtime observability gaps prevent AUTO_RECOVERY from being safe. The highest-priority technical problem is Goose ACP not emitting tool call events, which invalidates all tool-related safety guarantees.

@@ -1,5 +1,5 @@
 """
-Capability Intelligence System for Agent Guardian.
+Capability Intelligence System for Strixora.
 
 Provides capability registry, evidence tracking, verification statuses,
 gap analysis, and automated discovery for agent adapters.

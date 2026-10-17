@@ -1,5 +1,5 @@
 """
-Durable state persistence for Agent Guardian.
+Durable state persistence for Strixora.
 
 Provides atomic, validated persistence of session and turn state with
 schema versioning, corruption detection, and fail-closed loading.

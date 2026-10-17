@@ -1,5 +1,5 @@
 """
-Generic session and turn state tracking for Agent Guardian.
+Generic session and turn state tracking for Strixora.
 
 Agent-agnostic state model that tracks side-effect evidence for safety decisions.
 """

@@ -1,5 +1,5 @@
 """
-Recovery planner for Agent Guardian.
+Recovery planner for Strixora.
 
 Creates recovery plans based on failure classification, safety evaluation,
 and available adapter capabilities.

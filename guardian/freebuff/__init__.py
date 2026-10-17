@@ -1,5 +1,5 @@
 """
-FreeBuff Adapter for Agent Guardian.
+FreeBuff Adapter for Strixora.
 """
 
 from .adapter import FreeBuffAdapter, FreeBuffAdapterConfig

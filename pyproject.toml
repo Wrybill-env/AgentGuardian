@@ -3,14 +3,14 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-guardian"
+name = "strixora"
 version = "0.1.0"
 description = "A safety-first reliability layer for AI coding agents (Hermes, Goose, OpenCode, FreeBuff)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Agent Guardian Project"}
+    {name = "Strixora Project"}
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -46,9 +46,9 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Wrybill-env/AgentGuardian"
-Repository = "https://github.com/Wrybill-env/AgentGuardian"
-Issues = "https://github.com/Wrybill-env/AgentGuardian/issues"
+Homepage = "https://github.com/Wrybill-env/Strixora"
+Repository = "https://github.com/Wrybill-env/Strixora"
+Issues = "https://github.com/Wrybill-env/Strixora/issues"
 
 [project.scripts]
 guardian = "guardian.__main__:main"

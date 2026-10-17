@@ -1,5 +1,5 @@
 """
-Cross-process recovery lease for Agent Guardian.
+Cross-process recovery lease for Strixora.
 
 Ensures that at most one Guardian process executes a recovery action for a
 given session at a time. Backed by an OS-level file lock, so:

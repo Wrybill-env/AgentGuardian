@@ -1,5 +1,5 @@
 """
-Recovery budget tracking for Agent Guardian.
+Recovery budget tracking for Strixora.
 
 Tracks recovery attempts, cycles, and budgets to prevent infinite pathological loops
 while allowing persistent recovery through genuinely recoverable failures.

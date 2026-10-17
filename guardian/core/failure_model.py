@@ -1,5 +1,5 @@
 """
-Generic failure model for Agent Guardian.
+Generic failure model for Strixora.
 
 Defines failure taxonomy with evidence-based classification, separate from safety decisions.
 """

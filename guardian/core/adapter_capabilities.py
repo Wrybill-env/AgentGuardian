@@ -1,5 +1,5 @@
 """
-Adapter capability model for Agent Guardian.
+Adapter capability model for Strixora.
 
 Defines what capabilities an agent adapter must provide for recovery operations.
 Each capability corresponds to an actual executable operation.

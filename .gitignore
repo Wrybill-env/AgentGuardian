@@ -13,10 +13,11 @@ __pycache__/
 *.backup
 goose_bin/
 goose_extracted/
+strixora.egg-info/
 agent_guardian.egg-info/
 dist/
 
-# External dependencies (not part of Agent Guardian)
+# External dependencies (not part of Strixora)
 goose-cli-source/
 
 # IDE

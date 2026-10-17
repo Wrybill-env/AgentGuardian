@@ -1,5 +1,5 @@
 """
-Goose Desktop adapter for Agent Guardian.
+Goose Desktop adapter for Strixora.
 
 Integrates the Goose observer with the Guardian core state machine.
 """

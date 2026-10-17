@@ -1,5 +1,5 @@
 """
-Hermes Adapter for Agent Guardian.
+Hermes Adapter for Strixora.
 
 Provides a read-only interface to Hermes agent state that implements
 the AgentAdapter protocol expected by Guardian core.
