@@ -12,10 +12,12 @@ import asyncio
 import json
 import random
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Callable, AsyncGenerator
 from enum import Enum
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Callable, AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1117,8 +1119,8 @@ async def test_stale_without_tools_is_replay_safe():
 def test_cli_help():
     """Test CLI help output."""
     result = subprocess.run(
-        ["python", "-m", "guardian", "--help"],
-        cwd="C:\\Projects\\AgentGuardian",
+        [sys.executable, "-m", "guardian", "--help"],
+        cwd=str(Path(__file__).resolve().parent.parent),
         capture_output=True,
         text=True,
     )
